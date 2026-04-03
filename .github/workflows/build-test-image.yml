@@ -15,8 +15,8 @@ on:
         default: "v6.0.6"
 
 env:
-  # docker.io/rrawwwrrr/adbtest-tests
-  IMAGE: rrawwwrrr/adbtest-tests
+  # docker.io/rrawwwrrr/hub-test-tests
+  IMAGE: rrawwwrrr/hub-test-tests
 
 jobs:
   build-and-push:

@@ -1,11 +1,14 @@
-module adbtest
+module hub-test
 
 go 1.24.0
 
 require (
 	github.com/docker/docker v27.5.1+incompatible
 	github.com/docker/go-connections v0.5.0
+	xfarm.hub/hub-ws-client v0.0.0
 )
+
+replace xfarm.hub/hub-ws-client => /opt/claude/hub-ws-client-go
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
@@ -18,6 +21,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/term v0.5.0 // indirect

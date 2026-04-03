@@ -49,6 +49,9 @@ exports.config = {
       'appium:uiautomator2ServerInstallTimeout': 60000,
       // Non-rooted devices deny WRITE_SECURE_SETTINGS; ignore that error and continue.
       'appium:ignoreHiddenApiPolicyError': true,
+      // Prevent Appium from killing and restarting the ADB server — the ADB server
+      // runs inside the peer pod (not locally) and must stay on 0.0.0.0:5037.
+      'appium:suppressKillServer': true,
     },
   ],
 
@@ -118,11 +121,8 @@ exports.config = {
     } catch (e) { /* screen already on or keyguard protected */ }
 
     // Dismiss "USB-подключение" mode-selection dialog if present.
-    // First set MTP as default so the dialog doesn't reappear after next reboot,
-    // then try to find and click the Cancel button (various label variants by ROM).
-    try {
-      await driver.execute('mobile: shell', { command: 'svc', args: ['usb', 'setFunctions', 'mtp'] });
-    } catch (e) { /* ignore */ }
+    // NOTE: do NOT call 'svc usb setFunctions mtp' here — it changes the USB PID,
+    // causes re-enumeration and drops the ADB connection mid-test.
     try {
       const cancelBtn = await driver.$(
         '//*[@text="ОТМЕНА" or @text="Отмена" or @text="отмена" or ' +

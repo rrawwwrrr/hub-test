@@ -1,10 +1,10 @@
 #!/bin/bash
-# Собирает .deb пакет для adbtest.
+# Собирает .deb пакет для hub-test.
 # Использование: bash packaging/build-deb.sh [version]
 # Версия берётся из аргумента, GITHUB_REF_NAME или последнего git-тега.
 set -euo pipefail
 
-BINARY=${BINARY:-adbtest}
+BINARY=${BINARY:-hub-test}
 ARCH=${ARCH:-amd64}
 APK=${APK:-}
 
@@ -15,31 +15,31 @@ if [ -z "$VERSION" ]; then
 fi
 VERSION=${VERSION#v}  # убираем ведущий 'v'
 
-PKG="adbtest_${VERSION}_${ARCH}"
+PKG="hub-test_${VERSION}_${ARCH}"
 echo "Building ${PKG}.deb ..."
 
 # Создаём структуру пакета
 rm -rf "${PKG}"
-install -Dm755 "${BINARY}"                         "${PKG}/usr/local/bin/adbtest"
+install -Dm755 "${BINARY}"                         "${PKG}/usr/local/bin/hub-test"
 # Подставляем версию в TEST_IMAGE (latest → vX.Y.Z)
 mkdir -p "${PKG}/etc/default"
-sed "s|rrawwwrrr/adbtest-tests:latest|rrawwwrrr/adbtest-tests:${VERSION}|g" \
-    packaging/adbtest.env > "${PKG}/etc/default/adbtest"
-chmod 644 "${PKG}/etc/default/adbtest"
-install -Dm644 packaging/adbtest.service           "${PKG}/etc/systemd/system/adbtest.service"
-install -dm755                                     "${PKG}/var/lib/adbtest/apk"
-install -dm755                                     "${PKG}/var/lib/adbtest/reports/logs"
+sed "s|rrawwwrrr/hub-test-tests:latest|rrawwwrrr/hub-test-tests:${VERSION}|g" \
+    packaging/hub-test.env > "${PKG}/etc/default/hub-test"
+chmod 644 "${PKG}/etc/default/hub-test"
+install -Dm644 packaging/hub-test.service           "${PKG}/etc/systemd/system/hub-test.service"
+install -dm755                                     "${PKG}/var/lib/hub-test/apk"
+install -dm755                                     "${PKG}/var/lib/hub-test/reports/logs"
 
 # Включаем APK в пакет если передан через переменную APK=...
 if [ -n "${APK}" ] && [ -f "${APK}" ]; then
     echo "→ Bundling APK: ${APK}"
-    install -Dm644 "${APK}" "${PKG}/var/lib/adbtest/apk/$(basename "${APK}")"
+    install -Dm644 "${APK}" "${PKG}/var/lib/hub-test/apk/$(basename "${APK}")"
 fi
 
 # DEBIAN/control
 mkdir -p "${PKG}/DEBIAN"
 cat > "${PKG}/DEBIAN/control" <<EOF
-Package: adbtest
+Package: hub-test
 Version: ${VERSION}
 Section: utils
 Priority: optional
@@ -57,19 +57,19 @@ cat > "${PKG}/DEBIAN/postinst" <<'EOF'
 #!/bin/bash
 set -e
 systemctl daemon-reload
-systemctl enable adbtest
+systemctl enable hub-test
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║              adbtest успешно установлен                  ║"
+echo "║              hub-test успешно установлен                  ║"
 echo "╠══════════════════════════════════════════════════════════╣"
 echo "║  1. Отредактируй конфиг:                                 ║"
-echo "║     nano /etc/default/adbtest                            ║"
+echo "║     nano /etc/default/hub-test                            ║"
 echo "║                                                          ║"
 echo "║  2. Запусти сервис:                                      ║"
-echo "║     systemctl start adbtest                              ║"
+echo "║     systemctl start hub-test                              ║"
 echo "║                                                          ║"
-echo "║  3. Логи:  journalctl -u adbtest -f                      ║"
+echo "║  3. Логи:  journalctl -u hub-test -f                      ║"
 echo "║  4. Дашборд: http://<ip>:9080                            ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
@@ -80,8 +80,8 @@ chmod 755 "${PKG}/DEBIAN/postinst"
 cat > "${PKG}/DEBIAN/prerm" <<'EOF'
 #!/bin/bash
 set -e
-systemctl stop adbtest    2>/dev/null || true
-systemctl disable adbtest 2>/dev/null || true
+systemctl stop hub-test    2>/dev/null || true
+systemctl disable hub-test 2>/dev/null || true
 EOF
 chmod 755 "${PKG}/DEBIAN/prerm"
 

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS runs (
 	has_logs       INTEGER NOT NULL DEFAULT 0,
 	has_screenshot INTEGER NOT NULL DEFAULT 0,
 	battery_pct    INTEGER NOT NULL DEFAULT -1,
+	battery_temp   REAL    NOT NULL DEFAULT 0,
 	usb_path        TEXT    NOT NULL DEFAULT '',
 	session_ms      INTEGER NOT NULL DEFAULT 0,
 	apk_ms          INTEGER NOT NULL DEFAULT 0
@@ -79,6 +80,7 @@ var migrations = []string{
 	`ALTER TABLE runs ADD COLUMN usb_path        TEXT    NOT NULL DEFAULT ''`,
 	`ALTER TABLE runs ADD COLUMN session_ms      INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE runs ADD COLUMN apk_ms          INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE runs ADD COLUMN battery_temp   REAL    NOT NULL DEFAULT 0`,
 	// device_events table (new in v1.8.8)
 	`CREATE TABLE IF NOT EXISTS device_events (
 		id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,8 +134,9 @@ type Run struct {
 	TestSeconds  float64   `json:"test_seconds"`
 	HasLogs       bool   `json:"has_logs"`
 	HasScreenshot bool   `json:"has_screenshot"`
-	BatteryPct    int    `json:"battery_pct"` // battery level at test start; -1 = unknown
-	UsbPath       string `json:"usb_path"`    // sysfs USB path at time of run, e.g. "1-3.2"
+	BatteryPct    int     `json:"battery_pct"`  // battery level at test start; -1 = unknown
+	BatteryTemp   float64 `json:"battery_temp"` // temperature °C at test start; 0 = unknown
+	UsbPath       string  `json:"usb_path"`     // sysfs USB path at time of run, e.g. "1-3.2"
 	SessionMs     int    `json:"session_ms"`  // Appium POST /session duration in ms
 	ApkMs         int    `json:"apk_ms"`      // APK installation duration in ms
 }
@@ -191,8 +194,8 @@ func (s *Store) Insert(r Run) (int64, error) {
 	res, err := s.db.Exec(`
 		INSERT INTO runs
 		  (serial, model, finished_at, passing, failing, pending, found, boot_ok,
-		   boot_seconds, total_seconds, test_seconds, battery_pct, usb_path, session_ms, apk_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   boot_seconds, total_seconds, test_seconds, battery_pct, battery_temp, usb_path, session_ms, apk_ms)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Serial,
 		r.Model,
 		r.FinishedAt.UTC().Format(time.RFC3339),
@@ -205,6 +208,7 @@ func (s *Store) Insert(r Run) (int64, error) {
 		r.TotalSeconds,
 		r.TestSeconds,
 		r.BatteryPct,
+		r.BatteryTemp,
 		r.UsbPath,
 		r.SessionMs,
 		r.ApkMs,
@@ -242,7 +246,7 @@ func (s *Store) SetHasScreenshot(id int64) error {
 func (s *Store) List(serial string, limit int, from, to time.Time) ([]Run, error) {
 	query := `
 		SELECT id, serial, model, finished_at, passing, failing, pending, found,
-		       boot_ok, boot_seconds, total_seconds, test_seconds, has_logs, has_screenshot, battery_pct, usb_path, session_ms, apk_ms
+		       boot_ok, boot_seconds, total_seconds, test_seconds, has_logs, has_screenshot, battery_pct, battery_temp, usb_path, session_ms, apk_ms
 		FROM runs WHERE 1=1`
 	var args []any
 	if serial != "" {
@@ -286,7 +290,8 @@ type DeviceStats struct {
 	MinSetup   float64 `json:"min_setup"`
 	MaxSetup   float64 `json:"max_setup"`
 	UsbPath     string  `json:"usb_path"`     // last known USB path from device_events
-	LastBattery int     `json:"last_battery"` // battery_pct from most recent run; -1 = unknown
+	LastBattery int     `json:"last_battery"`  // battery_pct from most recent run; -1 = unknown
+	LastBatteryTemp float64 `json:"last_battery_temp"` // temperature °C from most recent run
 	AvgSession  float64 `json:"avg_session"`
 	MinSession  float64 `json:"min_session"`
 	MaxSession  float64 `json:"max_session"`
@@ -405,15 +410,17 @@ func (s *Store) Stats(from, to time.Time) ([]DeviceStats, error) {
 		stats[i].UsbPath = path.String
 
 		var batt sql.NullInt64
+		var battTemp sql.NullFloat64
 		_ = s.db.QueryRow(
-			`SELECT battery_pct FROM runs WHERE serial=? ORDER BY finished_at DESC LIMIT 1`,
+			`SELECT battery_pct, battery_temp FROM runs WHERE serial=? ORDER BY finished_at DESC LIMIT 1`,
 			stats[i].Serial,
-		).Scan(&batt)
+		).Scan(&batt, &battTemp)
 		if batt.Valid {
 			stats[i].LastBattery = int(batt.Int64)
 		} else {
 			stats[i].LastBattery = -1
 		}
+		stats[i].LastBatteryTemp = battTemp.Float64
 	}
 	return stats, nil
 }
@@ -448,7 +455,7 @@ func scanRuns(rows *sql.Rows) ([]Run, error) {
 			&r.Passing, &r.Failing, &r.Pending,
 			&found, &bootOK,
 			&r.BootSeconds, &r.TotalSeconds, &r.TestSeconds,
-			&hasLogs, &hasScreenshot, &r.BatteryPct, &r.UsbPath,
+			&hasLogs, &hasScreenshot, &r.BatteryPct, &r.BatteryTemp, &r.UsbPath,
 			&r.SessionMs, &r.ApkMs,
 		); err != nil {
 			return nil, err

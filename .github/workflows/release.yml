@@ -6,7 +6,7 @@ on:
     tags: ["v*"]
 
 env:
-  IMAGE: rrawwwrrr/adbtest-tests
+  IMAGE: rrawwwrrr/hub-test-tests
 
 jobs:
   # ── 1. Build Go binaries for all platforms ─────────────────────────────────
@@ -42,7 +42,7 @@ jobs:
             GOOS="${target%/*}"
             GOARCH="${target#*/}"
 
-            binary="adbtest-${name}"
+            binary="hub-test-${name}"
             [ "$GOOS" = "windows" ] && binary="${binary}.exe"
 
             echo "→ Building $binary (${GOOS}/${GOARCH})"
@@ -53,9 +53,9 @@ jobs:
 
             # Archive
             if [ "$GOOS" = "windows" ]; then
-              zip -j "dist/adbtest-${name}.zip" "dist/${binary}"
+              zip -j "dist/hub-test-${name}.zip" "dist/${binary}"
             else
-              tar -czf "dist/adbtest-${name}.tar.gz" -C dist "${binary}"
+              tar -czf "dist/hub-test-${name}.tar.gz" -C dist "${binary}"
             fi
 
             rm "dist/${binary}"
@@ -72,9 +72,9 @@ jobs:
       - name: Build .deb package (linux/amd64)
         run: |
           # Extract the linux/amd64 binary for deb packaging
-          tar -xzf dist/adbtest-linux-amd64.tar.gz -C dist/
-          BINARY=dist/adbtest-linux-amd64 APK=dist/ApiDemos-debug.apk bash packaging/build-deb.sh
-          mv adbtest_*.deb dist/
+          tar -xzf dist/hub-test-linux-amd64.tar.gz -C dist/
+          BINARY=dist/hub-test-linux-amd64 APK=dist/ApiDemos-debug.apk bash packaging/build-deb.sh
+          mv hub-test_*.deb dist/
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
@@ -156,34 +156,34 @@ jobs:
             BASE="https://github.com/rrawwwrrr/mobile-test/releases/download/${{ github.ref_name }}"
 
             # 1. Скачать и установить пакет (APK внутри)
-            wget "$BASE/adbtest_${{ env.SEMVER }}_amd64.deb"
-            sudo dpkg -i adbtest_${{ env.SEMVER }}_amd64.deb
+            wget "$BASE/hub-test_${{ env.SEMVER }}_amd64.deb"
+            sudo dpkg -i hub-test_${{ env.SEMVER }}_amd64.deb
 
             # 2. Отредактировать конфиг (образы Docker и т.д.)
-            sudo nano /etc/default/adbtest
+            sudo nano /etc/default/hub-test
 
             # 3. Запустить сервис
-            sudo systemctl start adbtest
+            sudo systemctl start hub-test
 
             # 4. Логи
-            journalctl -u adbtest -f
+            journalctl -u hub-test -f
             ```
 
             ## Docker test image
 
             ```
-            docker pull rrawwwrrr/adbtest-tests:${{ env.SEMVER }}
+            docker pull rrawwwrrr/hub-test-tests:${{ env.SEMVER }}
             ```
 
             ## Запуск бинарника напрямую
 
             ```bash
             # Linux amd64
-            tar xzf adbtest-linux-amd64.tar.gz
-            chmod +x adbtest-linux-amd64
+            tar xzf hub-test-linux-amd64.tar.gz
+            chmod +x hub-test-linux-amd64
 
-            ./adbtest-linux-amd64 \
+            ./hub-test-linux-amd64 \
               --watch \
-              --test-image rrawwwrrr/adbtest-tests:${{ env.SEMVER }} \
+              --test-image rrawwwrrr/hub-test-tests:${{ env.SEMVER }} \
               --http-addr :9080
             ```

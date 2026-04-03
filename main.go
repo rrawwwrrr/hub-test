@@ -16,11 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"adbtest/internal/adb"
-	"adbtest/internal/docker"
-	"adbtest/internal/store"
-	"adbtest/internal/usb"
-	"adbtest/internal/web"
+	"hub-test/internal/adb"
+	"hub-test/internal/docker"
+	k8smgr "hub-test/internal/k8s"
+	"hub-test/internal/store"
+	"hub-test/internal/types"
+	"hub-test/internal/usb"
+	"hub-test/internal/web"
 
 	dockerclient "github.com/docker/docker/client"
 )
@@ -28,6 +30,18 @@ import (
 // version is injected at build time via -ldflags "-X main.version=vX.Y.Z".
 // Falls back to "dev" for local builds.
 var version = "dev"
+
+// Manager is the interface implemented by both docker.Manager and k8s.Manager.
+type Manager interface {
+	Reconcile(ctx context.Context, devices []adb.Device) error
+	CheckPods(ctx context.Context)
+	RunningDevices(ctx context.Context) []types.RunningDevice
+	BuildTestImage(ctx context.Context, contextDir, tag string) error
+	PullImage(ctx context.Context, img string) error
+	SetUSBInfo(serial, path, vid, pid string)
+	SetNotify(fn func())
+	SetReconcile(fn func())
+}
 
 // envOr returns the value of the environment variable if set, otherwise the fallback.
 func envOr(key, fallback string) string {
@@ -71,7 +85,7 @@ func ensureAPK(path, url string) error {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 	log.Printf("[apk] downloading %s → %s", url, path)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("get: %w", err)
@@ -105,57 +119,47 @@ func defaultTestImage() string {
 	if version == "dev" {
 		return ""
 	}
-	return "rrawwwrrr/adbtest-tests:" + strings.TrimPrefix(version, "v")
+	return "nexus.rrawww.ru/hub-test-tests:" + strings.TrimPrefix(version, "v")
 }
 
 func main() {
-	// Environment variables serve as defaults; CLI flags override them.
-	//
-	// Supported env vars:
-	//   APPIUM_IMAGE        – Docker image for Appium        (default: appium/appium:latest)
-	//   APPIUM_BASE_PORT    – Starting host port             (default: 4723)
-	//   ADB_HOST            – ADB server host for containers (default: host.docker.internal)
-	//   ADB_PORT            – ADB server port                (default: 5037)
-	//   TEST_IMAGE          – Docker image for test runner   (default: "", disabled)
-	//   TEST_BUILD_CONTEXT  – Path to Dockerfile dir to build test image from
-	//   ADBTEST_WATCH       – Enable watch mode              (1/true/yes)
-	//   ADBTEST_INTERVAL    – Poll interval, e.g. "10s"      (default: 5s)
-	//   ADBTEST_PULL        – Pull Appium image before start (1/true/yes)
-	//   ADBTEST_RESTART_ADB – Restart ADB on all interfaces  (1/true/yes)
-	//   ADBTEST_HTTP_ADDR   – HTTP dashboard listen address  (default: :8080)
-	//   ADBTEST_DB          – SQLite database path           (default: reports/adbtest.db)
-	//   ADBTEST_APK         – Local APK file path            (default: apk/ApiDemos-debug.apk)
-	//   ADBTEST_APK_URL     – URL to download APK if missing (default: github release)
-
 	const defaultAPKURL = "https://github.com/appium/android-apidemos/releases/download/v6.0.6/ApiDemos-debug.apk"
 
 	var (
 		watch      = flag.Bool("watch", envOrBool("ADBTEST_WATCH"), "Continuously watch for device changes [$ADBTEST_WATCH]")
-		pullImage  = flag.Bool("pull", envOrBool("ADBTEST_PULL"), "Pull Appium image before starting [$ADBTEST_PULL]")
+		pullImage  = flag.Bool("pull", envOrBool("ADBTEST_PULL"), "Pull Appium image before starting (local mode only) [$ADBTEST_PULL]")
 		restartADB = flag.Bool("restart-adb", envOrBool("ADBTEST_RESTART_ADB"), "Restart ADB server to listen on all interfaces [$ADBTEST_RESTART_ADB]")
 
-		appiumImage = flag.String("image", envOr("APPIUM_IMAGE", "appium/appium:latest"), "Appium Docker image [$APPIUM_IMAGE]")
+		appiumImage = flag.String("image", envOr("APPIUM_IMAGE", "appium/appium:latest"), "Appium image [$APPIUM_IMAGE]")
 		adbHost     = flag.String("adb-host", envOr("ADB_HOST", "host.docker.internal"), "ADB server host reachable from containers [$ADB_HOST]")
 
-		basePort = flag.Int("port", envOrInt("APPIUM_BASE_PORT", 4723), "Starting host port for Appium containers [$APPIUM_BASE_PORT]")
+		basePort = flag.Int("port", envOrInt("APPIUM_BASE_PORT", 4723), "Starting host port for Appium containers (local mode) [$APPIUM_BASE_PORT]")
 		adbPort  = flag.Int("adb-port", envOrInt("ADB_PORT", 5037), "ADB server port [$ADB_PORT]")
 
-		// Test runner options.
-		// Default test image uses the release version tag so the binary and
-		// the test image are always in sync. Falls back to empty on dev builds.
-		testImage    = flag.String("test-image", envOr("TEST_IMAGE", defaultTestImage()), "Docker image for test containers; empty = no tests [$TEST_IMAGE]")
+		testImage    = flag.String("test-image", envOr("TEST_IMAGE", defaultTestImage()), "Docker/K8s image for test containers; empty = no tests [$TEST_IMAGE]")
 		testBuildCtx = flag.String("test-build", envOr("TEST_BUILD_CONTEXT", ""), "Build test image from this directory before starting [$TEST_BUILD_CONTEXT]")
 
-		// APK options.
-		apkPath = flag.String("apk", envOr("ADBTEST_APK", "apk/ApiDemos-debug.apk"), "Local APK file path; downloaded from --apk-url if missing [$ADBTEST_APK]")
+		apkPath = flag.String("apk", envOr("ADBTEST_APK", "apk/ApiDemos-debug.apk"), "Local APK file path [$ADBTEST_APK]")
 		apkURL  = flag.String("apk-url", envOr("ADBTEST_APK_URL", defaultAPKURL), "URL to download APK when --apk file is missing [$ADBTEST_APK_URL]")
 
-		// Dashboard options.
 		httpAddr = flag.String("http-addr", envOr("ADBTEST_HTTP_ADDR", ":8080"), "HTTP dashboard listen address [$ADBTEST_HTTP_ADDR]")
-		dbPath   = flag.String("db", envOr("ADBTEST_DB", "reports/adbtest.db"), "SQLite database path [$ADBTEST_DB]")
+		dbPath   = flag.String("db", envOr("ADBTEST_DB", "reports/hub-test.db"), "SQLite database path [$ADBTEST_DB]")
+
+		// Hub mode: hub-server WebSocket + K8s pod orchestration.
+		hubURL         = flag.String("hub-url", envOr("ADBTEST_HUB_URL", ""), "Hub-server base URL (e.g. http://hub-server.peer.svc.cluster.local:8080) [$ADBTEST_HUB_URL]")
+		hubNamespace   = flag.String("hub-namespace", envOr("ADBTEST_HUB_NAMESPACE", "peer"), "K8s namespace for peer pods and test pods [$ADBTEST_HUB_NAMESPACE]")
+		hubClientImage       = flag.String("hub-client-image", envOr("ADBTEST_HUB_CLIENT_IMAGE", ""), "hub-client image for ADB tunnel container [$ADBTEST_HUB_CLIENT_IMAGE]")
+		hubUsbmuxdHost       = flag.String("hub-usbmuxd-host", envOr("ADBTEST_HUB_USBMUXD_HOST", ""), "USBMUXD_HOST for hub-client (hub-server TCP proxy host) [$ADBTEST_HUB_USBMUXD_HOST]")
+		hubUsbmuxdPort       = flag.String("hub-usbmuxd-port", envOr("ADBTEST_HUB_USBMUXD_PORT", "27015"), "USBMUXD_PORT for hub-client (default: 27015) [$ADBTEST_HUB_USBMUXD_PORT]")
+		hubHandshakeSecret   = flag.String("hub-handshake-secret", envOr("ADBTEST_HUB_HANDSHAKE_SECRET", ""), "HANDSHAKE_SECRET for hub-client AES-GCM encryption [$ADBTEST_HUB_HANDSHAKE_SECRET]")
+		hubAdbTunnelMode     = flag.String("hub-tunnel-mode", envOr("ADBTEST_HUB_TUNNEL_MODE", ""), "TUNNEL_MODE for hub-client: persistent or transient [$ADBTEST_HUB_TUNNEL_MODE]")
+		hubNsService   = flag.String("hub-ns-service", envOr("ADBTEST_HUB_NS_SERVICE", "hub-test"), "hub-test K8s service name for APK URL construction [$ADBTEST_HUB_NS_SERVICE]")
+
+		iosTestImage   = flag.String("ios-test-image", envOr("IOS_TEST_IMAGE", ""), "K8s image for iOS test containers; empty = skip iOS devices [$IOS_TEST_IMAGE]")
+		iosAppiumImage = flag.String("ios-appium-image", envOr("IOS_APPIUM_IMAGE", ""), "Appium image for iOS (falls back to --image) [$IOS_APPIUM_IMAGE]")
+		iosIPAURL      = flag.String("ios-ipa-url", envOr("IOS_IPA_URL", ""), "IPA URL passed to iOS test container as IOS_IPA_URL [$IOS_IPA_URL]")
 	)
 
-	// interval needs special handling because it is a duration.
 	intervalDefault := 5 * time.Second
 	if v := os.Getenv("ADBTEST_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
@@ -164,19 +168,19 @@ func main() {
 			log.Printf("Warning: invalid duration for ADBTEST_INTERVAL=%q, using default %s", v, intervalDefault)
 		}
 	}
-	interval := flag.Duration("interval", intervalDefault, "Poll interval in watch mode [$ADBTEST_INTERVAL]")
+	interval := flag.Duration("interval", intervalDefault, "Poll interval in watch mode (local ADB mode) [$ADBTEST_INTERVAL]")
 
 	flag.Parse()
 
 	log.SetFlags(log.Ltime | log.Lmsgprefix)
-	log.SetPrefix("adbtest ")
+	log.SetPrefix("hub-test ")
 
-	if *restartADB {
-		if err := adb.EnsureServerListensOnAllInterfaces(); err != nil {
-			log.Fatalf("Failed to restart ADB server: %v", err)
-		}
-		time.Sleep(time.Second)
+	// Open SQLite store.
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		log.Fatalf("Store: %v", err)
 	}
+	defer st.Close()
 
 	// Ensure APK is available locally (download if needed).
 	absAPK, err := filepath.Abs(*apkPath)
@@ -187,86 +191,12 @@ func main() {
 		log.Fatalf("APK: %v", err)
 	}
 
-	// Open SQLite store.
-	st, err := store.Open(*dbPath)
-	if err != nil {
-		log.Fatalf("Store: %v", err)
-	}
-	defer st.Close()
-
-	cli, err := dockerclient.NewClientWithOpts(
-		dockerclient.FromEnv,
-		dockerclient.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		log.Fatalf("Docker client: %v", err)
-	}
-	defer cli.Close()
-
-	// Build the URL where Appium can fetch the APK.
-	// Appium containers use --network=host, so "localhost" resolves to the host.
-	apkServeURL := fmt.Sprintf("http://localhost%s/apk/%s", *httpAddr, filepath.Base(absAPK))
-
-	cfg := docker.Config{
-		AppiumImage: *appiumImage,
-		TestImage:   *testImage,
-		BasePort:    *basePort,
-		ADBHost:     *adbHost,
-		ADBPort:     *adbPort,
-		APKServeURL: apkServeURL,
-	}
-	mgr := docker.NewManager(cli, cfg, st)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Optionally build test image from a local Dockerfile directory.
-	if *testBuildCtx != "" {
-		tag := *testImage
-		if tag == "" {
-			tag = "adbtest-tests:latest"
-			cfg.TestImage = tag
-		}
-		if err := mgr.BuildTestImage(ctx, *testBuildCtx, tag); err != nil {
-			log.Fatalf("Build test image: %v", err)
-		}
-	}
-
-	// Optionally pull Docker images before starting.
-	if *pullImage {
-		if err := mgr.PullImage(ctx, *appiumImage); err != nil {
-			log.Fatalf("Pull appium image: %v", err)
-		}
-		if cfg.TestImage != "" {
-			if err := mgr.PullImage(ctx, cfg.TestImage); err != nil {
-				log.Fatalf("Pull test image: %v", err)
-			}
-		}
-	}
-
 	// Start HTTP dashboard + APK file server.
-	hub := web.NewHub()
-	webSrv := web.NewServer(st, hub)
-	mgr.NotifyFn = hub.Notify
-	// Debounce ReconcileFn: coalesce rapid calls into one reconcile after 300ms.
-	reconcileCh := make(chan struct{}, 1)
-	go func() {
-		for range reconcileCh {
-			time.Sleep(300 * time.Millisecond)
-			// drain any queued signals
-			for len(reconcileCh) > 0 {
-				<-reconcileCh
-			}
-			reconcileDevices(ctx, mgr, nil)
-		}
-	}()
-	mgr.ReconcileFn = func() {
-		select {
-		case reconcileCh <- struct{}{}:
-		default:
-		}
-	}
-	webSrv.RunningFn = mgr.RunningDevices
+	hubSSE := web.NewHub()
+	webSrv := web.NewServer(st, hubSSE)
 	mux := http.NewServeMux()
 	webSrv.RegisterRoutes(mux)
 	webSrv.ServeAPKDir(mux, filepath.Dir(absAPK))
@@ -280,14 +210,142 @@ func main() {
 	}()
 	defer httpServer.Shutdown(context.Background())
 
+	// ── Hub mode (K8s) ────────────────────────────────────────────────────────
+	if *hubURL != "" {
+		log.Printf("Hub mode: hub-server=%s namespace=%s", *hubURL, *hubNamespace)
+
+		k8sClient, err := k8smgr.InClusterClient(*hubNamespace)
+		if err != nil {
+			log.Fatalf("K8s in-cluster client: %v", err)
+		}
+
+		// APK URL inside the cluster via the hub-test Service.
+		apkServeURL := fmt.Sprintf("http://%s.%s.svc.cluster.local%s/apk/%s",
+			*hubNsService, *hubNamespace, *httpAddr, filepath.Base(absAPK))
+
+		k8sCfg := k8smgr.Config{
+			AppiumImage:        *appiumImage,
+			TestImage:          *testImage,
+			IOSTestImage:       *iosTestImage,
+			IOSAppiumImage:     *iosAppiumImage,
+			IPAServeURL:        *iosIPAURL,
+			HubClientImage:     *hubClientImage,
+			HubUsbmuxdHost:     *hubUsbmuxdHost,
+			HubUsbmuxdPort:     *hubUsbmuxdPort,
+			HubHandshakeSecret: *hubHandshakeSecret,
+			AdbTunnelMode:      *hubAdbTunnelMode,
+			APKServeURL:        apkServeURL,
+			HubURL:             *hubURL,
+			Namespace:          *hubNamespace,
+		}
+		kmgr := k8smgr.NewManager(k8sClient, k8sCfg, st)
+		kmgr.NotifyFn = hubSSE.Notify
+		webSrv.RunningFn = kmgr.RunningDevices
+
+		log.Printf("Hub mode watch (appium=%s tests=%s namespace=%s)",
+			*appiumImage, k8sCfg.TestImage, *hubNamespace)
+
+		// Periodic pod-completion check — collects results from finished pods.
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					kmgr.CheckPods(ctx)
+				}
+			}
+		}()
+
+		// Event-driven lifecycle via WebSocket.
+		adb.TrackHubDevices(ctx, *hubURL, *hubNamespace, kmgr, nil)
+		log.Println("Shutting down.")
+		return
+	}
+
+	// ── Local ADB mode (Docker) ────────────────────────────────────────────────
+	if *restartADB {
+		if err := adb.EnsureServerListensOnAllInterfaces(); err != nil {
+			log.Fatalf("Failed to restart ADB server: %v", err)
+		}
+		time.Sleep(time.Second)
+	}
+
+	cli, err := dockerclient.NewClientWithOpts(
+		dockerclient.FromEnv,
+		dockerclient.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		log.Fatalf("Docker client: %v", err)
+	}
+	defer cli.Close()
+
+	apkServeURL := fmt.Sprintf("http://localhost%s/apk/%s", *httpAddr, filepath.Base(absAPK))
+
+	dockerCfg := docker.Config{
+		AppiumImage: *appiumImage,
+		TestImage:   *testImage,
+		BasePort:    *basePort,
+		ADBHost:     *adbHost,
+		ADBPort:     *adbPort,
+		APKServeURL: apkServeURL,
+	}
+	dockerMgr := docker.NewManager(cli, dockerCfg, st)
+
+	if *testBuildCtx != "" {
+		tag := *testImage
+		if tag == "" {
+			tag = "hub-test-tests:latest"
+			dockerCfg.TestImage = tag
+		}
+		if err := dockerMgr.BuildTestImage(ctx, *testBuildCtx, tag); err != nil {
+			log.Fatalf("Build test image: %v", err)
+		}
+	}
+
+	if *pullImage {
+		if err := dockerMgr.PullImage(ctx, *appiumImage); err != nil {
+			log.Fatalf("Pull appium image: %v", err)
+		}
+		if dockerCfg.TestImage != "" {
+			if err := dockerMgr.PullImage(ctx, dockerCfg.TestImage); err != nil {
+				log.Fatalf("Pull test image: %v", err)
+			}
+		}
+	}
+
+	var mgr Manager = dockerMgr
+	mgr.SetNotify(hubSSE.Notify)
+
+	fetchDevices := func() ([]adb.Device, error) { return adb.ListDevices() }
+
+	reconcileCh := make(chan struct{}, 1)
+	go func() {
+		for range reconcileCh {
+			time.Sleep(300 * time.Millisecond)
+			for len(reconcileCh) > 0 {
+				<-reconcileCh
+			}
+			reconcileDevices(ctx, mgr, nil, fetchDevices)
+		}
+	}()
+	mgr.SetReconcile(func() {
+		select {
+		case reconcileCh <- struct{}{}:
+		default:
+		}
+	})
+	webSrv.RunningFn = mgr.RunningDevices
+
 	usbMon := usb.NewMonitor(st)
 	usbMon.OnModeChange = mgr.SetUSBInfo
 
 	if *watch {
 		log.Printf("Watch mode (interval=%s, appium=%s, tests=%s, base-port=%d)",
-			*interval, *appiumImage, cfg.TestImage, *basePort)
+			*interval, *appiumImage, dockerCfg.TestImage, *basePort)
 
-		// USB sysfs monitor runs on its own ticker (independent of ADB).
 		usbTicker := time.NewTicker(*interval)
 		defer usbTicker.Stop()
 		go func() {
@@ -302,13 +360,8 @@ func main() {
 			}
 		}()
 
-		// Initial reconcile via ListDevices before track-devices connects.
-		reconcileDevices(ctx, mgr, nil)
+		reconcileDevices(ctx, mgr, nil, fetchDevices)
 
-		// ADB track-devices: blocks and calls reconcile only when list changes.
-		// prevSnapshot is reset on each reconnect so that the initial device
-		// list sent by ADB after reconnect always triggers a reconcile — this
-		// ensures we catch up after a silent period (e.g. 60s read timeout).
 		var prevSnapshot string
 		adb.TrackDevices(ctx, func(devices []adb.Device) {
 			snap := deviceSnapshot(devices)
@@ -316,20 +369,19 @@ func main() {
 				return
 			}
 			prevSnapshot = snap
-			reconcileDevices(ctx, mgr, devices)
+			reconcileDevices(ctx, mgr, devices, fetchDevices)
 		}, func() {
-			prevSnapshot = "" // force reconcile on next onChange after reconnect
+			prevSnapshot = ""
 		})
 
 		log.Println("Shutting down.")
 	} else {
 		usbMon.Poll()
-		reconcileDevices(ctx, mgr, nil)
+		reconcileDevices(ctx, mgr, nil, fetchDevices)
 	}
 }
 
-// deviceSnapshot returns a stable string key for a device list so we can
-// detect changes without calling reconcile on every track-devices update.
+// deviceSnapshot returns a stable string key for a device list.
 func deviceSnapshot(devices []adb.Device) string {
 	parts := make([]string, len(devices))
 	for i, d := range devices {
@@ -339,14 +391,17 @@ func deviceSnapshot(devices []adb.Device) string {
 	return strings.Join(parts, ",")
 }
 
-func reconcileDevices(ctx context.Context, mgr *docker.Manager, devices []adb.Device) {
-	if devices == nil {
+func reconcileDevices(ctx context.Context, mgr Manager, devices []adb.Device, fetch func() ([]adb.Device, error)) {
+	if devices == nil && fetch != nil {
 		var err error
-		devices, err = adb.ListDevices()
+		devices, err = fetch()
 		if err != nil {
-			log.Printf("adb list devices: %v", err)
+			log.Printf("list devices: %v", err)
 			return
 		}
+	}
+	if devices == nil {
+		return
 	}
 	ready := 0
 	for _, d := range devices {

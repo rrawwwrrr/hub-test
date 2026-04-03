@@ -13,11 +13,14 @@ import (
 	"time"
 )
 
-// Device represents a connected Android device.
+// Device represents a connected Android or iOS device.
 type Device struct {
-	Serial string
-	State  string
-	Model  string // ro.product.model, populated for ready devices
+	Serial   string
+	State    string
+	Model    string  // ro.product.model (Android) or product name (iOS), populated for ready devices
+	ADBHost  string  // per-device ADB host override (hub mode); empty = use global config
+	ADBPort  int     // per-device ADB port override (hub mode); 0 = use global config
+	Platform string  // "android" or "ios"; empty is treated as "android"
 }
 
 // IsReady returns true if the device is online and ready.
@@ -155,25 +158,43 @@ func trackOnce(ctx context.Context, onChange func([]Device)) error {
 	}
 }
 
+// adbArgs builds the argument list for an adb command, prepending
+// -H host -P port when endpoint is non-empty (hub mode).
+// endpoint format: "host:port" or "" for local ADB.
+func adbArgs(endpoint, serial string, args ...string) []string {
+	var base []string
+	if endpoint != "" {
+		if i := strings.LastIndex(endpoint, ":"); i > 0 {
+			base = append(base, "-H", endpoint[:i], "-P", endpoint[i+1:])
+		}
+	}
+	base = append(base, "-s", serial)
+	return append(base, args...)
+}
+
 // Reboot sends `adb reboot` to the device.
-func Reboot(serial string) error {
-	if out, err := exec.Command("adb", "-s", serial, "reboot").CombinedOutput(); err != nil {
+// endpoint is "host:port" for hub mode or "" for local ADB.
+func Reboot(serial, endpoint string) error {
+	args := adbArgs(endpoint, serial, "reboot")
+	if out, err := exec.Command("adb", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("adb reboot: %w\n%s", err, out)
 	}
 	return nil
 }
 
 // isOnline returns true if the device reports state "device".
-func isOnline(serial string) bool {
-	out, err := exec.Command("adb", "-s", serial, "get-state").Output()
+func isOnline(serial, endpoint string) bool {
+	args := adbArgs(endpoint, serial, "get-state")
+	out, err := exec.Command("adb", args...).Output()
 	return err == nil && strings.TrimSpace(string(out)) == "device"
 }
 
 // isBootCompleted returns true when Android has finished booting
 // (sys.boot_completed=1). ADB becomes reachable well before the system
 // finishes starting, so checking only get-state is not enough.
-func isBootCompleted(serial string) bool {
-	out, err := exec.Command("adb", "-s", serial, "shell", "getprop", "sys.boot_completed").Output()
+func isBootCompleted(serial, endpoint string) bool {
+	args := adbArgs(endpoint, serial, "shell", "getprop", "sys.boot_completed")
+	out, err := exec.Command("adb", args...).Output()
 	return err == nil && strings.TrimSpace(string(out)) == "1"
 }
 
@@ -182,25 +203,24 @@ func isBootCompleted(serial string) bool {
 // It first waits (up to 30 s) for the device to go offline so we don't return
 // prematurely if it hasn't actually started rebooting yet.
 // Returns the total elapsed time from the moment it is called.
-func WaitForReady(serial string, timeout time.Duration) (time.Duration, error) {
+// endpoint is "host:port" for hub mode or "" for local ADB.
+func WaitForReady(serial string, timeout time.Duration, endpoint string) (time.Duration, error) {
 	start := time.Now()
 
 	// Phase 1 – wait for the device to go offline (max 30 s).
 	offlineDeadline := start.Add(30 * time.Second)
 	for time.Now().Before(offlineDeadline) {
-		if !isOnline(serial) {
+		if !isOnline(serial, endpoint) {
 			break
 		}
 		time.Sleep(2 * time.Second)
 	}
 
 	// Phase 2 – wait for the device to come back AND finish booting.
-	// ADB transport becomes available long before the system is fully up;
-	// sys.boot_completed=1 confirms that all system services have started.
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(3 * time.Second)
-		if isOnline(serial) && isBootCompleted(serial) {
+		if isOnline(serial, endpoint) && isBootCompleted(serial, endpoint) {
 			return time.Since(start), nil
 		}
 	}
@@ -209,10 +229,8 @@ func WaitForReady(serial string, timeout time.Duration) (time.Duration, error) {
 
 // GrantAppiumPermissions pre-grants SYSTEM_ALERT_WINDOW and POST_NOTIFICATIONS
 // to Appium helper packages so Android does not show permission dialogs during
-// test execution. Errors are silently ignored — the packages may not be
-// installed on the very first run (Appium installs them during its first
-// session); from the second run onwards the permission will already be set.
-func GrantAppiumPermissions(serial string) {
+// test execution. endpoint is "host:port" for hub mode or "" for local ADB.
+func GrantAppiumPermissions(serial, endpoint string) {
 	pkgs := []string{
 		"io.appium.settings",
 		"io.appium.uiautomator2.server",
@@ -221,24 +239,31 @@ func GrantAppiumPermissions(serial string) {
 	}
 	granted := 0
 	for _, pkg := range pkgs {
-		if err := exec.Command("adb", "-s", serial, "shell",
-			"appops", "set", pkg, "SYSTEM_ALERT_WINDOW", "allow").Run(); err == nil {
+		args := adbArgs(endpoint, serial, "shell", "appops", "set", pkg, "SYSTEM_ALERT_WINDOW", "allow")
+		if err := exec.Command("adb", args...).Run(); err == nil {
 			granted++
 		}
 	}
-	// POST_NOTIFICATIONS (Android 13+): only for packages that declare the
-	// permission in their manifest. Appium internal packages do not declare it,
-	// so pm grant would throw SecurityException — skip them.
 	for _, pkg := range []string{"io.appium.android.apis"} {
-		_ = exec.Command("adb", "-s", serial, "shell",
-			"pm", "grant", pkg, "android.permission.POST_NOTIFICATIONS").Run()
+		args := adbArgs(endpoint, serial, "shell", "pm", "grant", pkg, "android.permission.POST_NOTIFICATIONS")
+		_ = exec.Command("adb", args...).Run()
 	}
 	if granted > 0 {
 		log.Printf("[appium] granted SYSTEM_ALERT_WINDOW to %d package(s) on %s", granted, serial)
 	}
 	// Set default USB function to MTP so Android doesn't show the
 	// "USB-подключение" mode-selection dialog after reboot.
-	_ = exec.Command("adb", "-s", serial, "shell", "svc", "usb", "setFunctions", "mtp").Run()
+	args := adbArgs(endpoint, serial, "shell", "svc", "usb", "setFunctions", "mtp")
+	_ = exec.Command("adb", args...).Run()
+}
+
+// TakeScreenshot captures a PNG screenshot from the device.
+// endpoint is "host:port" for hub mode or "" for local ADB.
+func TakeScreenshot(serial, endpoint string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	args := adbArgs(endpoint, serial, "exec-out", "screencap", "-p")
+	return exec.CommandContext(ctx, "adb", args...).Output()
 }
 
 // androidVendors maps USB vendor IDs (lowercase hex) to OEM names.
@@ -354,8 +379,10 @@ func USBInfo(serial string) (path, vid, pid string) {
 
 // BatteryLevel returns the current battery charge level (0–100) for the device.
 // Returns -1 and a non-nil error if the level cannot be determined.
-func BatteryLevel(serial string) (int, error) {
-	out, err := exec.Command("adb", "-s", serial, "shell", "dumpsys", "battery").Output()
+// endpoint is "host:port" for hub mode or "" for local ADB.
+func BatteryLevel(serial, endpoint string) (int, error) {
+	args := adbArgs(endpoint, serial, "shell", "dumpsys", "battery")
+	out, err := exec.Command("adb", args...).Output()
 	if err != nil {
 		return -1, fmt.Errorf("adb dumpsys battery: %w", err)
 	}

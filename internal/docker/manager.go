@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -15,8 +16,9 @@ import (
 	"sync"
 	"time"
 
-	"adbtest/internal/adb"
-	"adbtest/internal/store"
+	"hub-test/internal/adb"
+	"hub-test/internal/store"
+	"hub-test/internal/types"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -27,21 +29,21 @@ import (
 )
 
 const (
-	labelManaged   = "adbtest.managed"
-	labelDevice    = "adbtest.device"
-	labelPort      = "adbtest.port"
-	labelRole      = "adbtest.role"
-	labelModel     = "adbtest.model"
-	labelStartedAt        = "adbtest.started_at"         // RFC3339 timestamp when test container was created
-	labelAppiumStartedAt  = "adbtest.appium_started_at"  // RFC3339 timestamp when appium container was created
-	labelBattery          = "adbtest.battery"             // battery % at test start (-1 = unknown)
+	labelManaged   = "hub-test.managed"
+	labelDevice    = "hub-test.device"
+	labelPort      = "hub-test.port"
+	labelRole      = "hub-test.role"
+	labelModel     = "hub-test.model"
+	labelStartedAt        = "hub-test.started_at"         // RFC3339 timestamp when test container was created
+	labelAppiumStartedAt  = "hub-test.appium_started_at"  // RFC3339 timestamp when appium container was created
+	labelBattery          = "hub-test.battery"             // battery % at test start (-1 = unknown)
 
 	roleAppium = "appium"
 	roleTests  = "tests"
 
 	// adbNetwork is a dedicated bridge network shared by appium + test containers
 	// so they can reach each other by container name without going through the host.
-	adbNetwork = "adbtest"
+	adbNetwork = "hub-test"
 )
 
 // wdio spec-reporter output patterns.
@@ -57,14 +59,17 @@ var (
 
 // Config holds the manager configuration.
 type Config struct {
-	AppiumImage string
-	TestImage   string // image to use for test containers ("" = disabled)
-	BasePort    int
-	ADBHost     string // hostname of ADB server, reachable from Appium containers
-	ADBPort     int
-	APKServeURL string // HTTP URL of the APK served by the built-in web server
-	             //   e.g. "http://localhost:8080/apk/ApiDemos-debug.apk"
-	             // Appium containers use --network=host so localhost resolves to the host.
+	AppiumImage  string
+	TestImage    string // image to use for test containers ("" = disabled)
+	BasePort     int
+	ADBHost      string // hostname of ADB server, reachable from Appium containers
+	ADBPort      int
+	APKServeURL  string // HTTP URL of the APK served by the built-in web server
+	              //   e.g. "http://localhost:8080/apk/ApiDemos-debug.apk"
+	              // Appium containers use --network=host so localhost resolves to the host.
+	HubDNS       string // CoreDNS server address for hub mode (e.g. "10.96.0.10")
+	K8sNamespace string // Kubernetes namespace for pod orchestration; "" = Docker mode
+	K8sConfig    string // path to kubeconfig; "" = in-cluster or $KUBECONFIG
 }
 
 // deviceContainers tracks the pair of containers managed for one device.
@@ -129,14 +134,8 @@ func (s testRunSummary) setupDuration() time.Duration {
 	return total - test
 }
 
-// RunningDevice describes the live container state for one device.
-type RunningDevice struct {
-	Serial          string    `json:"serial"`
-	AppiumPort      int       `json:"appium_port"`
-	AppiumStartedAt time.Time `json:"appium_started_at"`
-	TestStartedAt   time.Time `json:"test_started_at"`
-	HasTest         bool      `json:"has_test"`
-}
+// RunningDevice is an alias for the shared type.
+type RunningDevice = types.RunningDevice
 
 // Manager handles the lifecycle of Appium (and optionally test) Docker containers.
 type Manager struct {
@@ -145,11 +144,18 @@ type Manager struct {
 	store     *store.Store
 	NotifyFn    func() // called after each run is saved; used for SSE push
 	ReconcileFn func() // called when a test container exits; triggers a new reconcile
-	rebooting  sync.Map   // serial → struct{}: device is mid-reboot, skip test creation
-	reported   sync.Map   // containerID → struct{}: already processed, skip duplicate
-	reportMu   sync.Mutex // serialises writes to the daily report file
-	usbCache   sync.Map   // serial → [3]string{path, vid, pid}: last known USB info
+	rebooting    sync.Map   // serial → struct{}: device is mid-reboot, skip test creation
+	reported     sync.Map   // containerID → struct{}: already processed, skip duplicate
+	reportMu     sync.Mutex // serialises writes to the daily report file
+	usbCache     sync.Map   // serial → [3]string{path, vid, pid}: last known USB info
+	adbEndpoints sync.Map   // serial → "host:port": per-device ADB endpoint (hub mode)
 }
+
+// SetNotify sets the function called after each run is saved.
+func (m *Manager) SetNotify(fn func()) { m.NotifyFn = fn }
+
+// SetReconcile sets the function called when a test container exits.
+func (m *Manager) SetReconcile(fn func()) { m.ReconcileFn = fn }
 
 // NewManager creates a new Manager. st may be nil (SQLite disabled).
 func NewManager(cli *client.Client, cfg Config, st *store.Store) *Manager {
@@ -164,6 +170,15 @@ func NewManager(cli *client.Client, cfg Config, st *store.Store) *Manager {
 		}
 	}
 	return m
+}
+
+// adbEndpoint returns the ADB endpoint "host:port" for the given serial,
+// or "" if no override is set (local ADB mode).
+func (m *Manager) adbEndpoint(serial string) string {
+	if v, ok := m.adbEndpoints.Load(serial); ok {
+		return v.(string)
+	}
+	return ""
 }
 
 // SetUSBInfo updates usbCache for a device. Called by the USB monitor on mode_change.
@@ -234,6 +249,12 @@ func (m *Manager) Reconcile(ctx context.Context, devices []adb.Device) error {
 
 	readyDevices := make(map[string]adb.Device)
 	for _, d := range devices {
+		// Update per-device ADB endpoint (hub mode); clear for local-mode devices.
+		if d.ADBHost != "" {
+			m.adbEndpoints.Store(d.Serial, fmt.Sprintf("%s:%d", d.ADBHost, d.ADBPort))
+		} else {
+			m.adbEndpoints.Delete(d.Serial)
+		}
 		if d.IsReady() {
 			readyDevices[d.Serial] = d
 		}
@@ -266,8 +287,14 @@ func (m *Manager) Reconcile(ctx context.Context, devices []adb.Device) error {
 			}
 			if appiumExited {
 				log.Printf("[restart] appium exited for %s, removing and restarting", serial)
-				// Remove the exited appium container before creating a new one.
-				_ = m.cli.ContainerRemove(ctx, dc.AppiumID, container.RemoveOptions{Force: true})
+				// Remove the exited appium container/pod before creating a new one.
+				if m.isK8sMode() {
+					_ = m.removePodK8s(ctx, dc.TestID)
+					dc.TestID = ""
+					dc.TestStatus = ""
+				} else {
+					_ = m.cli.ContainerRemove(ctx, dc.AppiumID, container.RemoveOptions{Force: true})
+				}
 				dc.AppiumID = ""
 				dc.AppiumStatus = ""
 			}
@@ -276,7 +303,11 @@ func (m *Manager) Reconcile(ctx context.Context, devices []adb.Device) error {
 			if port == 0 {
 				port = m.nextPort(existing)
 			}
-			log.Printf("[create] appium for device %s on host port %d", serial, port)
+			if m.isK8sMode() {
+				log.Printf("[create] k8s pod for device %s", serial)
+			} else {
+				log.Printf("[create] appium for device %s on host port %d", serial, port)
+			}
 
 			newDC, err := m.createAppium(ctx, dev, port)
 			if err != nil {
@@ -284,12 +315,18 @@ func (m *Manager) Reconcile(ctx context.Context, devices []adb.Device) error {
 				continue
 			}
 			m.recordContainerEvent(serial, "appium_create", newDC.AppiumName)
-			// Update only Appium fields; preserve test container fields.
+			// Update Appium fields; in K8s mode also copy TestID (both in same pod).
 			dc.AppiumID = newDC.AppiumID
 			dc.AppiumPort = newDC.AppiumPort
 			dc.AppiumName = newDC.AppiumName
 			dc.AppiumStatus = newDC.AppiumStatus
 			dc.DeviceModel = newDC.DeviceModel
+			if m.isK8sMode() {
+				dc.TestID = newDC.TestID
+				dc.TestStatus = newDC.TestStatus
+				dc.TestStartedAt = newDC.TestStartedAt
+				dc.BatteryPct = newDC.BatteryPct
+			}
 			existing[serial] = dc
 
 			// Log connect event only for newly appearing devices, not Appium restarts.
@@ -310,18 +347,25 @@ func (m *Manager) Reconcile(ctx context.Context, devices []adb.Device) error {
 			continue
 		}
 
-		// Remove a stopped test container, report results, then reboot device.
+		// Remove a stopped test container/pod, report results, then reboot device.
 		if dc.TestID != "" {
 			if _, alreadyDone := m.reported.LoadOrStore(dc.TestID, struct{}{}); alreadyDone {
-				// Already reported but container still present — just remove it so
-				// it doesn't block future reconcile cycles.
+				// Already reported but container/pod still present — remove it.
 				log.Printf("[skip] already reported test container for %s, removing stale container", serial)
-				_ = m.cli.ContainerRemove(ctx, dc.TestID, container.RemoveOptions{Force: true})
+				if m.isK8sMode() {
+					_ = m.removePodK8s(ctx, dc.TestID)
+				} else {
+					_ = m.cli.ContainerRemove(ctx, dc.TestID, container.RemoveOptions{Force: true})
+				}
 				continue
 			}
 			summary := m.reportTestResult(ctx, serial, dc)
 			log.Printf("[cleanup] removing stopped test container for %s", serial)
-			_ = m.cli.ContainerRemove(ctx, dc.TestID, container.RemoveOptions{Force: true})
+			if m.isK8sMode() {
+				_ = m.removePodK8s(ctx, dc.TestID)
+			} else {
+				_ = m.cli.ContainerRemove(ctx, dc.TestID, container.RemoveOptions{Force: true})
+			}
 			// Write test results to DB and file immediately — don't wait for reboot.
 			summary = m.saveTestResult(summary)
 			m.rebooting.Store(serial, struct{}{})
@@ -369,6 +413,9 @@ func (m *Manager) BuildTestImage(ctx context.Context, contextDir, tag string) er
 // ── internal helpers ──────────────────────────────────────────────────────────
 
 func (m *Manager) ensureNetwork(ctx context.Context) error {
+	if m.isK8sMode() {
+		return nil // K8s pods have networking by default
+	}
 	f := filters.NewArgs(filters.Arg("name", adbNetwork))
 	nets, err := m.cli.NetworkList(ctx, network.ListOptions{Filters: f})
 	if err != nil {
@@ -384,8 +431,12 @@ func (m *Manager) ensureNetwork(ctx context.Context) error {
 	return err
 }
 
-// listManaged returns a map[serial]deviceContainers for all managed containers.
+// listManaged returns a map[serial]deviceContainers for all managed containers
+// or pods (depending on orchestration mode).
 func (m *Manager) listManaged(ctx context.Context) (map[string]deviceContainers, error) {
+	if m.isK8sMode() {
+		return m.listManagedK8s(ctx)
+	}
 	f := filters.NewArgs(filters.Arg("label", labelManaged+"=true"))
 	list, err := m.cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
 	if err != nil {
@@ -456,6 +507,10 @@ func (m *Manager) nextPort(existing map[string]deviceContainers) int {
 // host but then fail to connect to them because "localhost" inside the
 // container is the container itself, not the host.
 func (m *Manager) createAppium(ctx context.Context, dev adb.Device, hostPort int) (*deviceContainers, error) {
+	if m.isK8sMode() {
+		return m.createPodK8s(ctx, dev)
+	}
+
 	name := "appium-" + sanitize(dev.Serial)
 
 	// Free the port from any orphaned process before creating the container.
@@ -463,13 +518,25 @@ func (m *Manager) createAppium(ctx context.Context, dev adb.Device, hostPort int
 	// may still be alive and holding the port; kill it now so the bind succeeds.
 	killPortHolder(hostPort)
 
+	// In hub mode, Appium must connect to the peer pod's ADB server instead
+	// of the local one. Per-device overrides take precedence over global config.
+	adbAddress := "localhost"
+	adbPort := m.config.ADBPort
+	if dev.ADBHost != "" {
+		adbAddress = dev.ADBHost
+	} else if m.config.ADBHost != "" {
+		adbAddress = m.config.ADBHost
+	}
+	if dev.ADBPort != 0 {
+		adbPort = dev.ADBPort
+	}
+
 	cfg := &container.Config{
 		Image: m.config.AppiumImage,
 		Env: []string{
 			"ANDROID_SERIAL=" + dev.Serial,
-			// With host networking, ADB server is on localhost.
-			"ANDROID_ADB_SERVER_ADDRESS=localhost",
-			fmt.Sprintf("ANDROID_ADB_SERVER_PORT=%d", m.config.ADBPort),
+			"ANDROID_ADB_SERVER_ADDRESS=" + adbAddress,
+			fmt.Sprintf("ANDROID_ADB_SERVER_PORT=%d", adbPort),
 		},
 		// Skip start.sh (which wraps appium in xvfb-run) — Xvfb is not needed
 		// for Android/UiAutomator2, which talks to the device over ADB, not X11.
@@ -494,6 +561,11 @@ func (m *Manager) createAppium(ctx context.Context, dev adb.Device, hostPort int
 		// It also means Appium can reach the built-in HTTP server on localhost
 		// to download the APK (no volume mounts needed).
 		NetworkMode: "host",
+	}
+	// In hub mode, add CoreDNS so the container can resolve cluster hostnames
+	// (e.g. peer-{serial}.peer.svc.cluster.local) for ADB connectivity.
+	if m.config.HubDNS != "" {
+		hostCfg.DNS = []string{m.config.HubDNS}
 	}
 
 	resp, err := m.cli.ContainerCreate(ctx, cfg, hostCfg, nil, nil, name)
@@ -537,7 +609,12 @@ func (m *Manager) createAppium(ctx context.Context, dev adb.Device, hostPort int
 }
 
 // createTest starts a test container that connects to Appium running on the host network.
+// In K8s mode, this is a no-op: the test container is already part of the pod
+// created by createAppium/createPodK8s.
 func (m *Manager) createTest(ctx context.Context, dev adb.Device, appiumPort int) error {
+	if m.isK8sMode() {
+		return nil // tests container launched together with appium in createPodK8s
+	}
 	name := "tests-" + sanitize(dev.Serial)
 	now := time.Now().UTC()
 
@@ -549,11 +626,11 @@ func (m *Manager) createTest(ctx context.Context, dev adb.Device, appiumPort int
 	// Grant Appium overlay permissions — suppresses the "display over other
 	// apps" dialog that can block tests. Best-effort: silently skipped if
 	// Appium hasn't installed its helper packages yet (first-ever run).
-	adb.GrantAppiumPermissions(dev.Serial)
+	adb.GrantAppiumPermissions(dev.Serial, m.adbEndpoint(dev.Serial))
 
 	// Check battery level before starting tests — skip if below 29%.
 	batt := -1
-	if level, err := adb.BatteryLevel(dev.Serial); err != nil {
+	if level, err := adb.BatteryLevel(dev.Serial, m.adbEndpoint(dev.Serial)); err != nil {
 		log.Printf("[battery] %s: %v", dev.Serial, err)
 	} else {
 		batt = level
@@ -623,8 +700,20 @@ func (m *Manager) createTest(ctx context.Context, dev adb.Device, appiumPort int
 	return nil
 }
 
-// removeDevice force-removes both containers for a device.
+// removeDevice force-removes both containers for a device (Docker mode) or
+// deletes the pod (K8s mode).
 func (m *Manager) removeDevice(ctx context.Context, serial string, dc deviceContainers) {
+	if m.isK8sMode() {
+		if dc.TestID != "" {
+			if err := m.removePodK8s(ctx, dc.TestID); err != nil {
+				log.Printf("[remove] pod %s: %v", dc.TestID, err)
+			}
+		}
+		if serial != "" {
+			m.recordContainerEvent(serial, "container_remove", dc.AppiumName)
+		}
+		return
+	}
 	for _, id := range []string{dc.TestID, dc.AppiumID} {
 		if id == "" {
 			continue
@@ -655,37 +744,52 @@ func (m *Manager) reportTestResult(ctx context.Context, serial string, dc device
 		UsbPath:    usbPath,
 	}
 
-	rc, err := m.cli.ContainerLogs(ctx, dc.TestID, container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-	})
-	if err != nil {
-		log.Printf("[report] %s: could not read logs: %v", serial, err)
-		return summary
-	}
-	defer rc.Close()
-
-	// Docker log stream is multiplexed (stdout/stderr); stdcopy demuxes it.
 	var buf bytes.Buffer
-	if _, err := stdcopy.StdCopy(&buf, &buf, rc); err != nil {
-		_, _ = io.Copy(&buf, rc)
-	}
-	summary.TestLog = buf.Bytes()
+	if m.isK8sMode() {
+		// K8s: fetch logs directly from the pod's containers via kubectl.
+		testLogs, err := m.podLogsK8s(ctx, dc.TestID, "tests")
+		if err != nil {
+			log.Printf("[report] %s: could not read test logs: %v", serial, err)
+		} else {
+			buf.Write(testLogs)
+		}
+		summary.TestLog = buf.Bytes()
 
-	// Capture Appium container logs (last 2000 lines to keep file size reasonable).
-	if dc.AppiumID != "" {
-		arc, err := m.cli.ContainerLogs(ctx, dc.AppiumID, container.LogsOptions{
+		if appLogs, err := m.podLogsK8s(ctx, dc.TestID, "appium"); err == nil {
+			summary.AppiumLog = appLogs
+		}
+	} else {
+		// Docker: logs are multiplexed (stdout/stderr); stdcopy demuxes them.
+		rc, err := m.cli.ContainerLogs(ctx, dc.TestID, container.LogsOptions{
 			ShowStdout: true,
 			ShowStderr: true,
-			Tail:       "2000",
 		})
-		if err == nil {
-			var abuf bytes.Buffer
-			if _, err := stdcopy.StdCopy(&abuf, &abuf, arc); err != nil {
-				_, _ = io.Copy(&abuf, arc)
+		if err != nil {
+			log.Printf("[report] %s: could not read logs: %v", serial, err)
+			return summary
+		}
+		defer rc.Close()
+
+		if _, err := stdcopy.StdCopy(&buf, &buf, rc); err != nil {
+			_, _ = io.Copy(&buf, rc)
+		}
+		summary.TestLog = buf.Bytes()
+
+		// Capture Appium container logs (last 2000 lines).
+		if dc.AppiumID != "" {
+			arc, err := m.cli.ContainerLogs(ctx, dc.AppiumID, container.LogsOptions{
+				ShowStdout: true,
+				ShowStderr: true,
+				Tail:       "2000",
+			})
+			if err == nil {
+				var abuf bytes.Buffer
+				if _, err := stdcopy.StdCopy(&abuf, &abuf, arc); err != nil {
+					_, _ = io.Copy(&abuf, arc)
+				}
+				arc.Close()
+				summary.AppiumLog = abuf.Bytes()
 			}
-			arc.Close()
-			summary.AppiumLog = abuf.Bytes()
 		}
 	}
 
@@ -732,14 +836,11 @@ func (m *Manager) reportTestResult(ctx context.Context, serial string, dc device
 
 	// Take a screenshot before the device is rebooted (only on failure/crash).
 	if !summary.Found || summary.Failing > 0 {
-		sCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(sCtx, "adb", "-s", serial, "exec-out", "screencap", "-p")
-		if png, err := cmd.Output(); err == nil && len(png) > 0 {
+		if png, err := adb.TakeScreenshot(serial, m.adbEndpoint(serial)); err != nil {
+			log.Printf("[screenshot] %s: %v", serial, err)
+		} else if len(png) > 0 {
 			summary.Screenshot = png
 			log.Printf("[screenshot] captured for %s (%d bytes)", serial, len(png))
-		} else if err != nil {
-			log.Printf("[screenshot] %s: %v", serial, err)
 		}
 	}
 
@@ -771,14 +872,15 @@ func (m *Manager) reportTestResult(ctx context.Context, serial string, dc device
 func (m *Manager) rebootAndReport(summary testRunSummary) {
 	log.Printf("[reboot] rebooting %s...", summary.deviceLabel())
 
-	if err := adb.Reboot(summary.Serial); err != nil {
+	endpoint := m.adbEndpoint(summary.Serial)
+	if err := adb.Reboot(summary.Serial, endpoint); err != nil {
 		log.Printf("[reboot] %s: %v", summary.Serial, err)
 		m.rebooting.Delete(summary.Serial)
 		m.updateBootResult(summary.RunID, 0, false)
 		return
 	}
 
-	bootDuration, err := adb.WaitForReady(summary.Serial, 5*time.Minute)
+	bootDuration, err := adb.WaitForReady(summary.Serial, 5*time.Minute, endpoint)
 	if err != nil {
 		log.Printf("[reboot] %s: %v", summary.Serial, err)
 		m.rebooting.Delete(summary.Serial)
@@ -787,7 +889,7 @@ func (m *Manager) rebootAndReport(summary testRunSummary) {
 	}
 
 	log.Printf("[reboot] %s ready after %s", summary.deviceLabel(), bootDuration.Round(time.Second))
-	adb.GrantAppiumPermissions(summary.Serial)
+	adb.GrantAppiumPermissions(summary.Serial, endpoint)
 	// Wait for the device to fully stabilize: some devices switch USB VID:PID
 	// after the initial ADB ready signal (e.g. 18d1→22d9 on Realme), briefly
 	// dropping off ADB. Without this pause, the next Appium session fails with
@@ -1015,3 +1117,288 @@ func sanitize(s string) string {
 	}
 	return string(b)
 }
+
+// ── Kubernetes pod orchestration ──────────────────────────────────────────────
+//
+// When Config.K8sNamespace is set, the manager creates Kubernetes Pods instead
+// of Docker containers. Each device gets one pod (named "hub-test-{serial}")
+// with two containers: "appium" (sidecar) and "tests" (main). Both containers
+// share localhost within the pod, so tests reach Appium on localhost:4723.
+//
+// kubectl must be available on PATH and the kubeconfig must grant permissions
+// to create/list/delete pods in Config.K8sNamespace.
+
+// isK8sMode reports whether Kubernetes pod orchestration is enabled.
+func (m *Manager) isK8sMode() bool { return m.config.K8sNamespace != "" }
+
+// kubectlCmd returns an exec.Cmd for kubectl with optional kubeconfig override
+// and the given arguments.
+func (m *Manager) kubectlCmd(ctx context.Context, args ...string) *exec.Cmd {
+	full := make([]string, 0, len(args)+2)
+	if m.config.K8sConfig != "" {
+		full = append(full, "--kubeconfig", m.config.K8sConfig)
+	}
+	full = append(full, args...)
+	return exec.CommandContext(ctx, "kubectl", full...)
+}
+
+// k8sPodName returns the pod name for the given device serial.
+func k8sPodName(serial string) string {
+	return "hub-test-" + sanitize(serial)
+}
+
+// Minimal JSON structs for parsing kubectl -o json output.
+type k8sPodList struct {
+	Items []k8sPod `json:"items"`
+}
+
+type k8sPod struct {
+	Metadata struct {
+		Name              string            `json:"name"`
+		CreationTimestamp string            `json:"creationTimestamp"`
+		Labels            map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Status struct {
+		Phase            string               `json:"phase"`
+		ContainerStatuses []k8sContainerStatus `json:"containerStatuses"`
+	} `json:"status"`
+}
+
+type k8sContainerStatus struct {
+	Name  string `json:"name"`
+	State struct {
+		Running    *struct{ StartedAt string `json:"startedAt"` }               `json:"running"`
+		Terminated *struct{ ExitCode int `json:"exitCode"`; FinishedAt string `json:"finishedAt"` } `json:"terminated"`
+		Waiting    *struct{ Reason string `json:"reason"` }                     `json:"waiting"`
+	} `json:"state"`
+}
+
+// listManagedK8s lists all hub-test-managed pods in the K8s namespace.
+func (m *Manager) listManagedK8s(ctx context.Context) (map[string]deviceContainers, error) {
+	ns := m.config.K8sNamespace
+	out, err := m.kubectlCmd(ctx,
+		"get", "pods",
+		"-n", ns,
+		"-l", labelManaged+"=true",
+		"-o", "json",
+	).Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get pods: %w", err)
+	}
+
+	var list k8sPodList
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("kubectl parse pods: %w", err)
+	}
+
+	result := make(map[string]deviceContainers)
+	for _, pod := range list.Items {
+		serial := pod.Metadata.Labels[labelDevice]
+		if serial == "" {
+			continue
+		}
+
+		podName := pod.Metadata.Name
+		model := pod.Metadata.Labels[labelModel]
+		batt := -1
+		if bp := pod.Metadata.Labels[labelBattery]; bp != "" {
+			n, _ := strconv.Atoi(bp)
+			batt = n
+		}
+
+		var startedAt time.Time
+		if ts := pod.Metadata.Labels[labelStartedAt]; ts != "" {
+			startedAt, _ = time.Parse(time.RFC3339, ts)
+		} else if pod.Metadata.CreationTimestamp != "" {
+			startedAt, _ = time.Parse(time.RFC3339, pod.Metadata.CreationTimestamp)
+		}
+
+		// Determine status for each container by inspecting containerStatuses.
+		testStatus := "running"  // default: still starting or running
+		appiumStatus := "running"
+
+		for _, cs := range pod.Status.ContainerStatuses {
+			switch cs.Name {
+			case "tests":
+				if cs.State.Terminated != nil {
+					testStatus = "exited"
+				} else if cs.State.Running != nil {
+					testStatus = "running"
+				}
+			case "appium":
+				if cs.State.Terminated != nil {
+					appiumStatus = "exited"
+				}
+			}
+		}
+		// If the pod itself has failed (e.g. OOMKilled), treat both as exited.
+		if pod.Status.Phase == "Failed" || pod.Status.Phase == "Succeeded" {
+			testStatus = "exited"
+			appiumStatus = "exited"
+		}
+
+		result[serial] = deviceContainers{
+			AppiumID:        podName,
+			AppiumPort:      4723,
+			AppiumName:      podName,
+			AppiumStatus:    appiumStatus,
+			AppiumStartedAt: startedAt,
+			TestID:          podName,
+			TestStatus:      testStatus,
+			TestStartedAt:   startedAt,
+			DeviceModel:     model,
+			BatteryPct:      batt,
+		}
+	}
+	return result, nil
+}
+
+// createPodK8s creates a Kubernetes pod for the given device with Appium and
+// test containers sharing localhost within the pod.
+func (m *Manager) createPodK8s(ctx context.Context, dev adb.Device) (*deviceContainers, error) {
+	ns := m.config.K8sNamespace
+	podName := k8sPodName(dev.Serial)
+	now := time.Now().UTC()
+
+	// Check battery before creating the pod.
+	batt := -1
+	if level, err := adb.BatteryLevel(dev.Serial, m.adbEndpoint(dev.Serial)); err != nil {
+		log.Printf("[battery] %s: %v", dev.Serial, err)
+	} else {
+		batt = level
+		log.Printf("[battery] %s: %d%%", dev.Serial, batt)
+		if batt < 29 {
+			log.Printf("[skip] %s battery too low (%d%% < 29%%), not creating pod", dev.Serial, batt)
+			return nil, fmt.Errorf("battery too low: %d%% (minimum 29%%)", batt)
+		}
+	}
+
+	adb.GrantAppiumPermissions(dev.Serial, m.adbEndpoint(dev.Serial))
+
+	// Build env vars for the tests container.
+	testEnv := []string{
+		fmt.Sprintf(`{"name":"ANDROID_SERIAL","value":%q}`, dev.Serial),
+		`{"name":"APPIUM_HOST","value":"localhost"}`,
+		`{"name":"APPIUM_PORT","value":"4723"}`,
+	}
+	if m.config.APKServeURL != "" {
+		testEnv = append(testEnv, fmt.Sprintf(`{"name":"APIDEMOS_APK_URL","value":%q}`, m.config.APKServeURL))
+	}
+
+	appiumCmd := fmt.Sprintf(
+		"appium --log /var/log/appium.log --log-timestamp --log-no-colors --port 4723 --address 0.0.0.0 --allow-insecure=uiautomator2:adb_shell",
+	)
+
+	// Build pod JSON. We use native sidecar pattern (K8s 1.29+): appium is an
+	// initContainer with restartPolicy:Always so the pod completes when only
+	// the tests container exits. On older clusters the restartPolicy field is
+	// ignored by older API servers and both containers are treated as regular
+	// containers (pod won't auto-complete, but we detect test completion via
+	// containerStatuses and delete the pod ourselves).
+	podJSON := fmt.Sprintf(`{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": %q,
+    "namespace": %q,
+    "labels": {
+      %q: "true",
+      %q: %q,
+      %q: "combined",
+      %q: %q,
+      %q: %q,
+      %q: %q
+    }
+  },
+  "spec": {
+    "restartPolicy": "Never",
+    "initContainers": [
+      {
+        "name": "appium",
+        "image": %q,
+        "restartPolicy": "Always",
+        "env": [
+          {"name":"ANDROID_SERIAL","value":%q},
+          {"name":"ANDROID_ADB_SERVER_ADDRESS","value":%q},
+          {"name":"ANDROID_ADB_SERVER_PORT","value":%q}
+        ],
+        "command": ["sh","-c",%q]
+      }
+    ],
+    "containers": [
+      {
+        "name": "tests",
+        "image": %q,
+        "env": [%s]
+      }
+    ]
+  }
+}`,
+		podName, ns,
+		// labels
+		labelManaged, labelDevice, dev.Serial, labelRole, labelModel, dev.Model,
+		labelStartedAt, now.UTC().Format(time.RFC3339),
+		labelBattery, strconv.Itoa(batt),
+		// appium container
+		m.config.AppiumImage,
+		dev.Serial,
+		dev.ADBHost,
+		strconv.Itoa(dev.ADBPort),
+		appiumCmd,
+		// tests container
+		m.config.TestImage,
+		strings.Join(testEnv, ","),
+	)
+
+	cmd := m.kubectlCmd(ctx, "apply", "-f", "-", "-n", ns)
+	cmd.Stdin = strings.NewReader(podJSON)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("kubectl apply pod: %w\n%s", err, out)
+	}
+	log.Printf("[k8s] created pod %s in namespace %s", podName, ns)
+
+	return &deviceContainers{
+		AppiumID:        podName,
+		AppiumPort:      4723,
+		AppiumName:      podName,
+		AppiumStatus:    "running",
+		AppiumStartedAt: now,
+		TestID:          podName,
+		TestStatus:      "running",
+		TestStartedAt:   now,
+		DeviceModel:     dev.Model,
+		BatteryPct:      batt,
+	}, nil
+}
+
+// removePodK8s deletes the Kubernetes pod for the given device.
+func (m *Manager) removePodK8s(ctx context.Context, podName string) error {
+	ns := m.config.K8sNamespace
+	out, err := m.kubectlCmd(ctx,
+		"delete", "pod", podName,
+		"-n", ns,
+		"--ignore-not-found",
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("kubectl delete pod %s: %w\n%s", podName, err, out)
+	}
+	return nil
+}
+
+// podLogsK8s returns the logs of a container within a pod.
+func (m *Manager) podLogsK8s(ctx context.Context, podName, containerName string) ([]byte, error) {
+	ns := m.config.K8sNamespace
+	out, err := m.kubectlCmd(ctx,
+		"logs", podName,
+		"-c", containerName,
+		"-n", ns,
+	).Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl logs %s/%s: %w", podName, containerName, err)
+	}
+	return out, nil
+}
+
+
+// CheckPods is a no-op in Docker mode (no K8s pods).
+func (m *Manager) CheckPods(_ context.Context) {}

@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"adbtest/internal/adb"
-	"adbtest/internal/store"
+	"hub-test/internal/adb"
+	"hub-test/internal/store"
 )
 
 // Monitor polls USB devices and records appear/disappear/mode_change events.

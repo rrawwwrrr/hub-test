@@ -1,0 +1,49 @@
+---
+# ServiceAccount for hub-test pods
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hub-test
+  namespace: peer
+
+---
+# Role: allow hub-test to manage test pods and read their logs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hub-test-role
+  namespace: peer
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+---
+# RoleBinding: bind hub-test ServiceAccount to the role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hub-test-rolebinding
+  namespace: peer
+subjects:
+  - kind: ServiceAccount
+    name: hub-test
+    namespace: peer
+roleRef:
+  kind: Role
+  name: hub-test-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ImagePullSecret for pulling images from Nexus
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nexus-pull-secret
+  namespace: peer
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: eyJhdXRocyI6eyJuZXh1cy5ycmF3d3cucnUiOnsiYXV0aCI6IllXUnRhVzQ2TjJVMVptUXdZVFl0TnpObVpDMDBOelkxTFdJd05Ua3RObUl3TVdRNU5HUTFaVGRtIn19fQ==

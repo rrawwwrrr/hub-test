@@ -1,0 +1,110 @@
+---
+# PersistentVolumeClaim for reports and APK storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hub-test-data
+  namespace: peer
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# ConfigMap for non-secret configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hub-test-config
+  namespace: peer
+data:
+  ADBTEST_WATCH: "true"
+  ADBTEST_HTTP_ADDR: ":8080"
+  ADBTEST_DB: "/data/reports/hub-test.db"
+  ADBTEST_APK: "/data/apk/ApiDemos-debug.apk"
+  ADBTEST_HUB_NAMESPACE: "peer"
+  ADBTEST_HUB_NS_SERVICE: "hub-test"
+  # ADBTEST_HUB_URL is set below in the Deployment env section
+  # APPIUM_IMAGE: override if needed
+  # TEST_IMAGE: override to enable tests
+
+---
+# Service: expose HTTP dashboard inside the cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: hub-test
+  namespace: peer
+spec:
+  selector:
+    app: hub-test
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hub-test
+  namespace: peer
+  labels:
+    app: hub-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hub-test
+  template:
+    metadata:
+      labels:
+        app: hub-test
+    spec:
+      serviceAccountName: hub-test
+      imagePullSecrets:
+        - name: nexus-pull-secret
+      containers:
+        - name: hub-test
+          image: registry.rrawww.ru/hub-test:dev
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: hub-test-config
+          env:
+            - name: ADBTEST_HUB_URL
+              value: "http://hub-server.peer.svc.cluster.local:8080"
+            # Uncomment and set to enable hub-client (iOS usbmuxd proxy):
+            # - name: ADBTEST_HUB_CLIENT_IMAGE
+            #   value: "nexus.rrawww.ru/hub-client:latest"
+            # - name: ADBTEST_HUB_USBMUXD_HOST
+            #   value: "hub-server.peer.svc.cluster.local"
+            # - name: ADBTEST_HUB_USBMUXD_PORT
+            #   value: "31543"
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hub-test-data

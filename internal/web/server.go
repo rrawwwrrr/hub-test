@@ -14,9 +14,9 @@ import (
 
 	"context"
 
-	"adbtest/internal/adb"
-	"adbtest/internal/docker"
-	"adbtest/internal/store"
+	"hub-test/internal/adb"
+	"hub-test/internal/store"
+	"hub-test/internal/types"
 )
 
 const defaultLimit = 200
@@ -63,7 +63,7 @@ type Server struct {
 	store     *store.Store
 	hub       *Hub
 	tmpl      *template.Template
-	RunningFn func(ctx context.Context) []docker.RunningDevice
+	RunningFn func(ctx context.Context) []types.RunningDevice
 }
 
 // NewServer creates a new Server.
@@ -298,12 +298,12 @@ func (s *Server) handleAPIStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPIRunning(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	var result []docker.RunningDevice
+	var result []types.RunningDevice
 	if s.RunningFn != nil {
 		result = s.RunningFn(r.Context())
 	}
 	if result == nil {
-		result = []docker.RunningDevice{}
+		result = []types.RunningDevice{}
 	}
 	json.NewEncoder(w).Encode(result)
 }
@@ -439,7 +439,7 @@ const dashboardHTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>adbtest — результаты тестов</title>
+<title>hub-test — результаты тестов</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
@@ -487,7 +487,7 @@ tr:hover td{background:#1a1d27}
 </head>
 <body>
 <header>
-  <h1>📱 adbtest</h1>
+  <h1>📱 hub-test</h1>
   <span id="cst" style="font-size:.8rem;color:#64748b">⏳ подключение...</span>
   <a href="/usb" style="margin-left:auto;font-size:.8rem;color:#64748b;text-decoration:none" onmouseover="this.style.color='#a5b4fc'" onmouseout="this.style.color='#64748b'">USB устройства</a>
 </header>
@@ -563,6 +563,7 @@ tr:hover td{background:#1a1d27}
         {{else if lt .LastBattery 30}}<span style="color:#f87171">🔋{{.LastBattery}}%</span>
         {{else if lt .LastBattery 50}}<span style="color:#fbbf24">🔋{{.LastBattery}}%</span>
         {{else}}<span style="color:#86efac">🔋{{.LastBattery}}%</span>{{end}}
+        {{if gt .LastBatteryTemp 0.0}}<span style="color:#94a3b8;margin-left:4px">🌡{{printf "%.1f" .LastBatteryTemp}}°C</span>{{end}}
       </div>
     </div>
   </div>
@@ -630,7 +631,7 @@ tr:hover td{background:#1a1d27}
 <thead><tr>
   <th>Время</th><th>Устройство</th><th>Итог</th>
   <th>Прошло</th><th>Упало</th><th>Ожидает</th>
-  <th>Сессия</th><th>APK</th><th>Тесты</th><th>Перезагрузка</th><th>Батарея</th><th>USB путь</th><th>Логи</th>
+  <th>Сессия</th><th>APK</th><th>Тесты</th><th>Перезагрузка</th><th>Батарея</th><th>Темп.</th><th>USB путь</th><th>Логи</th>
 </tr></thead>
 <tbody id="tbody">
 {{range .Runs}}
@@ -657,6 +658,9 @@ tr:hover td{background:#1a1d27}
     {{else if lt .BatteryPct 30}}<span style="color:#f87171">{{.BatteryPct}}%</span>
     {{else if lt .BatteryPct 50}}<span style="color:#fbbf24">{{.BatteryPct}}%</span>
     {{else}}<span style="color:#86efac">{{.BatteryPct}}%</span>{{end}}
+  </td>
+  <td style="color:{{if gt .BatteryTemp 40.0}}#f87171{{else if gt .BatteryTemp 35.0}}#fbbf24{{else}}#94a3b8{{end}}">
+    {{if gt .BatteryTemp 0.0}}{{printf "%.1f" .BatteryTemp}}°C{{else}}—{{end}}
   </td>
   <td class="mono" style="color:#475569;font-size:.75rem">{{if .UsbPath}}{{.UsbPath}}{{else}}—{{end}}</td>
   <td>
@@ -729,7 +733,7 @@ function renderStats(stats){
     return '<div data-serial="'+esc(st.serial)+'" style="background:#1a1d27;border:1px solid #2d3148;border-radius:10px;padding:16px">'+
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px">'+
         '<div><div class="mono" style="font-size:.85rem;color:#e2e8f0">'+esc(st.serial)+'</div>'+(st.model?'<div style="font-size:.75rem;color:#64748b;margin-top:2px">'+esc(st.model)+'</div>':'')+(st.usb_path?'<div class="mono" style="font-size:.7rem;color:#475569;margin-top:2px">'+esc(st.usb_path)+'</div>':'')+(devCfgs[st.serial]&&devCfgs[st.serial].test_vid?'<div class="mono" style="font-size:.65rem;color:#3b82f6;margin-top:2px">тест: '+esc(devCfgs[st.serial].test_vid)+':'+esc(devCfgs[st.serial].test_pid)+'</div>':'')+'</div>'+
-        '<div style="text-align:right">'+badge+'<div style="margin-top:6px;font-size:.75rem">'+battFmt(st.last_battery)+'</div></div>'+
+        '<div style="text-align:right">'+badge+'<div style="margin-top:6px;font-size:.75rem">'+battFmt(st.last_battery)+(st.last_battery_temp>0?'<span style="color:#94a3b8;margin-left:4px">🌡'+st.last_battery_temp.toFixed(1)+'°C</span>':'')+'</div></div>'+
       '</div>'+
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">'+
         '<div style="background:#0f1117;border-radius:6px;padding:10px"><div style="font-size:.7rem;color:#64748b;margin-bottom:4px">УПАЛО ТЕСТОВ</div><div style="font-size:1.1rem;font-weight:600;color:'+fc+'">'+st.total_fail+'<span style="font-size:.75rem;font-weight:400;color:#64748b"> / '+st.total_tests+'</span></div></div>'+

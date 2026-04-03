@@ -1,14 +1,14 @@
 [Unit]
 Description=ADB Test Runner
-Documentation=https://github.com/rrawwwrrr/adbtest
+Documentation=https://github.com/rrawwwrrr/hub-test
 After=docker.service network-online.target
 Requires=docker.service
 
 [Service]
 Type=simple
-WorkingDirectory=/var/lib/adbtest
-EnvironmentFile=/etc/default/adbtest
-ExecStart=/usr/local/bin/adbtest --watch --pull
+WorkingDirectory=/var/lib/hub-test
+EnvironmentFile=/etc/default/hub-test
+ExecStart=/usr/local/bin/hub-test --watch --pull
 Restart=on-failure
 RestartSec=15
 TimeoutStopSec=3
