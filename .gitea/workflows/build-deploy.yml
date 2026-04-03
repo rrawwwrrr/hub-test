@@ -1,0 +1,49 @@
+name: Build & Deploy hub-test (adbtest)
+
+on:
+  push:
+    branches: [main]
+    tags: ['dev*', 'v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (e.g. dev13)'
+        required: true
+        default: 'dev-manual'
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=main-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Login to registry
+        run: |
+          docker login registry.rrawww.ru -u admin -p ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build & Push
+        run: |
+          IMAGE="registry.rrawww.ru/hub-test:${{ steps.tag.outputs.tag }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy to Kubernetes
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl set image deployment/adbtest adbtest="$IMAGE" -n peer
+          kubectl rollout status deployment/adbtest -n peer --timeout=120s
