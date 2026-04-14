@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    release: {{ .Release.Name }}
+  annotations:
+    gitlab/pipeline-url: {{ .Values.pipeline | default "" }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+        release: {{ .Release.Name }}
+      annotations:
+        checksum/config: {{ .Values.hubTest.configmap | toJson | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- else if .Values.hubTest.imagePullSecrets }}
+      imagePullSecrets:
+        - name: {{ .Values.hubTest.imagePullSecrets.name }}
+      {{- end }}
+      containers:
+        - name: {{ .Release.Name }}
+          {{- if .Values.image.repository }}
+          image: "{{ .Values.image.repository }}"
+          {{- else }}
+          image: "{{ .Values.hubTest.image }}:{{ .Values.hubTest.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.hubTest.imagePullPolicy | default "IfNotPresent" }}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ .Release.Name }}
+          {{- with .Values.hubTest.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data

@@ -1,0 +1,25 @@
+hubTest:
+  image: registry.rrawww.ru/hub-test
+  tag: dev12
+  imagePullPolicy: Always
+  imagePullSecrets:
+    name: regcred
+  pvc:
+    size: 10Gi
+  configmap:
+    ADBTEST_WATCH: "true"
+    ADBTEST_HTTP_ADDR: ":8080"
+    ADBTEST_DB: "/data/reports/hub-test.db"
+    ADBTEST_APK: "/data/apk/ApiDemos-debug.apk"
+    ADBTEST_HUB_NAMESPACE: "peer"
+    ADBTEST_HUB_NS_SERVICE: "hub-test"
+    ADBTEST_HUB_URL: "http://hub-server.peer.svc.cluster.local:8080"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+pipeline: ${CI_PIPELINE_URL}

@@ -1,0 +1,18 @@
+hubTest:
+  image: registry.rrawww.ru/hub-test
+  tag: dev12
+  imagePullPolicy: Always
+  imagePullSecrets:
+    name: regcred
+  pvc:
+    size: 10Gi
+  configmap: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+pipeline: ""
