@@ -1,6 +1,6 @@
 hubTest:
-  image: registry.rrawww.ru/hub-test
-  tag: dev12
+  image: harbor.rnd.lanit.ru/public/hub-test
+  tag: fix
   imagePullPolicy: Always
   imagePullSecrets:
     name: regcred
