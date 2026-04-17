@@ -11,8 +11,8 @@ RUN CGO_ENABLED=1 GOOS=linux go build -mod=vendor -ldflags="-X main.version=${VE
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM ubuntu:24.04
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
+RUN apt-get update -o "Acquire::https::Verify-Peer=false" \
+ && apt-get install -o "Acquire::https::Verify-Peer=false" -y --no-install-recommends \
       adb \
       ca-certificates \
  && rm -rf /var/lib/apt/lists/*
