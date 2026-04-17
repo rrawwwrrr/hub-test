@@ -23,12 +23,12 @@ ingress:
   enabled: true
   className: nginx-internal
   hosts:
-    - host: test.mfarm.rnd.lanit.ru
+    - host: test.rrawww.ru
       paths:
         - path: /
           pathType: Prefix
           backend:
             service:
-              name: myapp
+              name: hub-test
               port:
-                number: 80
+                number: 8080

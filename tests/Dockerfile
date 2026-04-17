@@ -1,7 +1,7 @@
 FROM node:20-slim
 
 # curl is needed by the entrypoint health-check wait loop
-RUN apt-get update -o "Acquire::https::Verify-Peer=false" && apt-get install -o "Acquire::https::Verify-Peer=false"  -y --no-install-recommends curl ca-certificates \
+RUN apt-get update -o "Acquire::https::Verify-Peer=false" && apt-get install -o "Acquire::https::Verify-Peer=false" -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
