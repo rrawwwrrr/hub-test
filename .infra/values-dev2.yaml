@@ -1,9 +1,13 @@
 image:
-  repository: harbor.rnd.lanit.ru/public/hub-test
-  tag: fix
   pullPolicy: Always
+
 imagePullSecrets:
   - name: regcred
+
+serviceAccount:
+  create: false
+  name: hub-test
+
 envVariables:
   ADBTEST_WATCH: "true"
   ADBTEST_HTTP_ADDR: ":8080"
@@ -12,6 +16,33 @@ envVariables:
   ADBTEST_HUB_NAMESPACE: "peer"
   ADBTEST_HUB_NS_SERVICE: "hub-test"
   ADBTEST_HUB_URL: "http://hub-server.peer.svc.cluster.local:8080"
+
+ports:
+  - name: http
+    containerPort: 8080
+    protocol: TCP
+
+service:
+  enabled: true
+  port: 8080
+  targetPort: http
+
+pvc:
+  enabled: true
+  name: hub-test-data
+  storageSize: 10Gi
+  storageClassName: local-path
+  accessModes: ReadWriteOnce
+
+volumeMounts:
+  - name: data
+    mountPath: /data
+
+volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: hub-test-data
+
 resources:
   requests:
     cpu: 100m
@@ -19,6 +50,7 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
 ingress:
   enabled: true
   className: nginx-internal
@@ -27,8 +59,5 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
-          backend:
-            service:
-              name: myapp
-              port:
-                number: 80
+
+pipeline: ${CI_PIPELINE_URL}
