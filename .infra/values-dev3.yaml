@@ -18,6 +18,7 @@ envVariables:
   ADBTEST_HUB_URL: "http://hub-server.peer.svc.cluster.local:8080"
   TEST_IMAGE: "harbor.rnd.lanit.ru/public/hub-test-tests:${CI_COMMIT_REF_SLUG}"
   IOS_TEST_IMAGE: "harbor.rnd.lanit.ru/public/hub-test-tests-ios:${CI_COMMIT_REF_SLUG}"
+  APPIUM_IMAGE: "dhub.rnd.lanit.ru/appium/appium:latest"
 
 ports:
   - name: http
