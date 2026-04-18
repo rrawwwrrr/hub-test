@@ -22,6 +22,7 @@ envVariables:
   ADBTEST_HUB_CLIENT_IMAGE: "harbor.rnd.lanit.ru/public/hub-client:${CI_COMMIT_REF_SLUG}"
   ADBTEST_HUB_USBMUXD_HOST: "hub-server.peer.svc.cluster.local"
   ADBTEST_HUB_USBMUXD_PORT: "27015"
+  ADBTEST_HUB_HANDSHAKE_SECRET: "secret:hub#HANDSHAKE_SECRET"
 
 ports:
   - name: http
