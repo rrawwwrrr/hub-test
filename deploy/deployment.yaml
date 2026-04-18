@@ -70,7 +70,7 @@ spec:
         - name: nexus-pull-secret
       containers:
         - name: hub-test
-          image: registry.rrawww.ru/hub-test:dev
+          image: harbor.rnd.lanit.ru/public/hub-test:dev
           imagePullPolicy: Always
           envFrom:
             - configMapRef:
@@ -80,7 +80,7 @@ spec:
               value: "http://hub-server.peer.svc.cluster.local:8080"
             # Uncomment and set to enable hub-client (iOS usbmuxd proxy):
             # - name: ADBTEST_HUB_CLIENT_IMAGE
-            #   value: "nexus.rrawww.ru/hub-client:latest"
+            #   value: "harbor.rnd.lanit.ru/public/hub-client:latest"
             # - name: ADBTEST_HUB_USBMUXD_HOST
             #   value: "hub-server.peer.svc.cluster.local"
             # - name: ADBTEST_HUB_USBMUXD_PORT

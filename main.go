@@ -119,7 +119,7 @@ func defaultTestImage() string {
 	if version == "dev" {
 		return ""
 	}
-	return "nexus.rrawww.ru/hub-test-tests:" + strings.TrimPrefix(version, "v")
+	return "harbor.rnd.lanit.ru/public/hub-test-tests:" + strings.TrimPrefix(version, "v")
 }
 
 func main() {

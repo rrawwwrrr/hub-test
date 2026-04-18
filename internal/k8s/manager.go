@@ -600,15 +600,16 @@ func (m *Manager) createIOSPod(ctx context.Context, dev adb.Device) error {
 	// uppercase hex) which differs from the hub-server serial (lowercase, no hyphen).
 	iosUDID := iosUDIDFromSerial(dev.Serial)
 
-	// hub-client tunnels for iOS (same as for Android but with DEVICE_TYPE=ios):
-	//   usbmuxd: localhost:27015 → hub-server → peer-<serial>:27015
-	//   wda:     localhost:7777  → hub-server → peer-<serial>:8100
-	// USBMUXD_SOCKET env tells hub-client the local TCP address for the usbmuxd tunnel.
-	const localUsbmuxPort = "127.0.0.1:27015"
+	// hub-client tunnels for iOS:
+	//   usbmuxd: /var/run/usbmuxd (Unix socket) → hub-server → peer-<serial>:27015
+	//   wda:     localhost:7777 (TCP)            → hub-server → peer-<serial>:8100
+	// The usbmuxd socket is shared via emptyDir volume so Appium finds it at the standard path.
+	const localUsbmuxSocket = "/var/run/usbmuxd"
 	const localWDAPort = "7777"
 
 	volumes := []Volume{
 		{Name: "shared", EmptyDir: &EmptyDir{}},
+		{Name: "usbmuxd-run", EmptyDir: &EmptyDir{}},
 	}
 	var containers []Container
 
@@ -619,9 +620,7 @@ func (m *Manager) createIOSPod(ctx context.Context, dev adb.Device) error {
 			{Name: "DEVICE_TYPE", Value: "ios"},
 			{Name: "USBMUXD_HOST", Value: m.config.HubUsbmuxdHost},
 			{Name: "USBMUXD_PORT", Value: m.config.HubUsbmuxdPort},
-			// USBMUXD_SOCKET tells hub-client to listen on this TCP address for the
-			// usbmuxd tunnel (instead of a Unix socket).
-			{Name: "USBMUXD_SOCKET", Value: localUsbmuxPort},
+			{Name: "USBMUXD_SOCKET", Value: localUsbmuxSocket},
 			{Name: "HANDSHAKE_SECRET", Value: m.config.HubHandshakeSecret},
 			{Name: "TZ", Value: "Europe/Moscow"},
 		}
@@ -629,9 +628,10 @@ func (m *Manager) createIOSPod(ctx context.Context, dev adb.Device) error {
 			hubEnv = append(hubEnv, EnvVar{Name: "TUNNEL_MODE", Value: m.config.AdbTunnelMode})
 		}
 		containers = append(containers, Container{
-			Name:  "hub-client",
-			Image: m.config.HubClientImage,
-			Env:   hubEnv,
+			Name:         "hub-client",
+			Image:        m.config.HubClientImage,
+			Env:          hubEnv,
+			VolumeMounts: []VolumeMount{{Name: "usbmuxd-run", MountPath: "/var/run"}},
 		})
 	}
 
@@ -648,18 +648,18 @@ wait $APID 2>/dev/null
 exit 0`
 	appiumEnv := []EnvVar{
 		{Name: "IOS_UDID", Value: iosUDID},
-		// node-usbmuxd (used by XCUITest driver) reads this env var to locate usbmuxd.
-		// hub-client listens on this TCP address and proxies to hub-server → peer:27015.
-		{Name: "USBMUXD_SOCKET_ADDRESS", Value: localUsbmuxPort},
 		{Name: "TZ", Value: "Europe/Moscow"},
 	}
 	containers = append(containers, Container{
-		Name:         "appium",
-		Image:        iosAppiumImage,
-		Command:      []string{"sh", "-c"},
-		Args:         []string{appiumScript},
-		Env:          appiumEnv,
-		VolumeMounts: []VolumeMount{{Name: "shared", MountPath: "/shared"}},
+		Name:    "appium",
+		Image:   iosAppiumImage,
+		Command: []string{"sh", "-c"},
+		Args:    []string{appiumScript},
+		Env:     appiumEnv,
+		VolumeMounts: []VolumeMount{
+			{Name: "shared", MountPath: "/shared"},
+			{Name: "usbmuxd-run", MountPath: "/var/run"},
+		},
 	})
 
 	// Tests container.

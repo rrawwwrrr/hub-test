@@ -1,5 +1,5 @@
 hubTest:
-  image: registry.rrawww.ru/hub-test
+  image: harbor.rnd.lanit.ru/public/hub-test
   tag: dev12
   imagePullPolicy: Always
   imagePullSecrets:
