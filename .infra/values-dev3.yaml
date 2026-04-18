@@ -25,6 +25,7 @@ envVariables:
   ADBTEST_HUB_USBMUXD_PORT: "27015"
   ADBTEST_HUB_HANDSHAKE_SECRET: "${HANDSHAKE_SECRET}"
   IOS_IPA_URL: "https://nexus.rnd.lanit.ru/repository/share/testapp2.ipa"
+  IOS_BUNDLE_ID: "lanit.testapp"
 
 ports:
   - name: http

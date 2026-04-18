@@ -31,6 +31,7 @@ type Config struct {
 	IOSTestImage         string // iOS test image; "" = skip iOS devices
 	IOSAppiumImage       string // Appium image for iOS; falls back to AppiumImage
 	IPAServeURL          string // IPA URL passed to iOS test container as IOS_IPA_URL
+	IOSBundleID          string // bundle ID passed to iOS test container as IOS_BUNDLE_ID
 	HubClientImage       string // "" = no hub-client container
 	HubUsbmuxdHost       string // USBMUXD_HOST for hub-client (hub-server TCP proxy host)
 	HubUsbmuxdPort       string // USBMUXD_PORT for hub-client (default "27015")
@@ -678,6 +679,9 @@ exit $STATUS`
 	}
 	if m.config.IPAServeURL != "" {
 		testsEnv = append(testsEnv, EnvVar{Name: "IOS_IPA_URL", Value: m.config.IPAServeURL})
+	}
+	if m.config.IOSBundleID != "" {
+		testsEnv = append(testsEnv, EnvVar{Name: "IOS_BUNDLE_ID", Value: m.config.IOSBundleID})
 	}
 	containers = append(containers, Container{
 		Name:         "tests",

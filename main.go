@@ -158,6 +158,7 @@ func main() {
 		iosTestImage   = flag.String("ios-test-image", envOr("IOS_TEST_IMAGE", ""), "K8s image for iOS test containers; empty = skip iOS devices [$IOS_TEST_IMAGE]")
 		iosAppiumImage = flag.String("ios-appium-image", envOr("IOS_APPIUM_IMAGE", ""), "Appium image for iOS (falls back to --image) [$IOS_APPIUM_IMAGE]")
 		iosIPAURL      = flag.String("ios-ipa-url", envOr("IOS_IPA_URL", ""), "IPA URL passed to iOS test container as IOS_IPA_URL [$IOS_IPA_URL]")
+		iosBundleID    = flag.String("ios-bundle-id", envOr("IOS_BUNDLE_ID", ""), "Bundle ID passed to iOS test container as IOS_BUNDLE_ID [$IOS_BUNDLE_ID]")
 	)
 
 	intervalDefault := 5 * time.Second
@@ -229,6 +230,7 @@ func main() {
 			IOSTestImage:       *iosTestImage,
 			IOSAppiumImage:     *iosAppiumImage,
 			IPAServeURL:        *iosIPAURL,
+			IOSBundleID:        *iosBundleID,
 			HubClientImage:     *hubClientImage,
 			HubUsbmuxdHost:     *hubUsbmuxdHost,
 			HubUsbmuxdPort:     *hubUsbmuxdPort,
