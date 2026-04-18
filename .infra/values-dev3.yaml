@@ -19,6 +19,9 @@ envVariables:
   TEST_IMAGE: "harbor.rnd.lanit.ru/public/hub-test-tests:${CI_COMMIT_REF_SLUG}"
   IOS_TEST_IMAGE: "harbor.rnd.lanit.ru/public/hub-test-tests-ios:${CI_COMMIT_REF_SLUG}"
   APPIUM_IMAGE: "dhub.rnd.lanit.ru/appium/appium:latest"
+  ADBTEST_HUB_CLIENT_IMAGE: "harbor.rnd.lanit.ru/public/hub-client:${CI_COMMIT_REF_SLUG}"
+  ADBTEST_HUB_USBMUXD_HOST: "hub-server.peer.svc.cluster.local"
+  ADBTEST_HUB_USBMUXD_PORT: "27015"
 
 ports:
   - name: http
