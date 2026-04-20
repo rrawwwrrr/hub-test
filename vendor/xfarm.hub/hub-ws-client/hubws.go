@@ -87,17 +87,22 @@ type DeviceEventHandler interface {
 	// OnDeviceDeleted is called when the device is fully removed from hub-server (DEVICE DELETE).
 	// Fires ~1 minute after disconnect when the peer pod is torn down.
 	OnDeviceDeleted(serial, platform string)
+
+	// OnBatteryUpdated is called when hub-server receives a battery update from the peer pod.
+	// level is percentage (0-100), temp is in tenths of a degree Celsius.
+	OnBatteryUpdated(serial, platform string, level, temp int)
 }
 
 // BaseHandler provides empty default implementations of DeviceEventHandler.
 // Embed this in your handler struct to avoid implementing unused methods.
 type BaseHandler struct{}
 
-func (BaseHandler) OnWelcome(_ []*HubDevice)           {}
-func (BaseHandler) OnDeviceConnected(_ *HubDevice)     {}
-func (BaseHandler) OnDeviceReady(_ *HubDevice)         {}
-func (BaseHandler) OnDeviceOffline(_, _ string)        {}
-func (BaseHandler) OnDeviceDeleted(_, _ string)        {}
+func (BaseHandler) OnWelcome(_ []*HubDevice)               {}
+func (BaseHandler) OnDeviceConnected(_ *HubDevice)         {}
+func (BaseHandler) OnDeviceReady(_ *HubDevice)             {}
+func (BaseHandler) OnDeviceOffline(_, _ string)            {}
+func (BaseHandler) OnDeviceDeleted(_, _ string)            {}
+func (BaseHandler) OnBatteryUpdated(_, _ string, _, _ int) {}
 
 // wsMsg is the envelope for all hub-server WebSocket messages.
 type wsMsg struct {
@@ -275,16 +280,39 @@ func (c *Client) runOnce(ctx context.Context, wsURL string, handler DeviceEventH
 			}
 
 		case "UPDATE":
-			if msg.Type == "STATUS" && msg.Device != "" && len(msg.Data) > 2 {
-				var upd HubDevice
-				if err := json.Unmarshal(msg.Data, &upd); err == nil {
-					mu.Lock()
-					if d, ok := devices[msg.Device]; ok {
-						d.Status = upd.Status
-						d.ContainerStatus = upd.ContainerStatus
+			if msg.Device == "" {
+				continue
+			}
+			switch msg.Type {
+			case "STATUS":
+				if len(msg.Data) > 2 {
+					var upd HubDevice
+					if err := json.Unmarshal(msg.Data, &upd); err == nil {
+						mu.Lock()
+						if d, ok := devices[msg.Device]; ok {
+							d.Status = upd.Status
+							d.ContainerStatus = upd.ContainerStatus
+						}
+						mu.Unlock()
+						log.Printf("[hub-ws] STATUS UPDATE: %s → %s", msg.Device, upd.Status)
 					}
-					mu.Unlock()
-					log.Printf("[hub-ws] STATUS UPDATE: %s → %s", msg.Device, upd.Status)
+				}
+			case "BATTERY":
+				if len(msg.Data) > 2 {
+					var bat struct {
+						BatteryLevel       int `json:"batteryLevel"`
+						BatteryTemperature int `json:"batteryTemperature"`
+					}
+					if err := json.Unmarshal(msg.Data, &bat); err == nil {
+						mu.Lock()
+						platform := msg.Platform
+						if d, ok := devices[msg.Device]; ok {
+							platform = d.Platform()
+						}
+						mu.Unlock()
+						log.Printf("[hub-ws] BATTERY UPDATE: %s level=%d%%", msg.Device, bat.BatteryLevel)
+						handler.OnBatteryUpdated(msg.Device, platform, bat.BatteryLevel, bat.BatteryTemperature)
+					}
 				}
 			}
 

@@ -1,0 +1,44 @@
+include:
+  - project: 'cicd-template/build'
+    ref: main
+    file:
+      - 'build.yaml'
+      - 'deploy.yaml'
+
+stages:
+  - build
+  - deploy
+
+build:
+  extends: .build
+  variables:
+    DOCKER_FILE_PATH: .infra/docker/Dockerfile
+  only:
+    - develop
+    - fix
+
+deploy:
+  extends: .deploy
+  variables:
+    K8S_SERVER: mfarm
+    NAMESPACE: peer
+    VALUES_DIR: .infra
+    HELM_VALUES_FILE: values-dev2.yaml
+    CHART_PATH: .infra/helm
+  only:
+    - develop
+    - fix
+
+deploy:rrr:
+  extends: .deploy
+  tags:
+    - rrr
+  variables:
+    K8S_SERVER: rrr
+    NAMESPACE: peer
+    VALUES_DIR: .infra
+    HELM_VALUES_FILE: values-dev3.yaml
+    CHART_PATH: .infra/helm
+  only:
+    - develop
+    - fix

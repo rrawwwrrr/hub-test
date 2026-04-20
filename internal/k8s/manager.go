@@ -55,6 +55,7 @@ type Manager struct {
 	adbEndpoints sync.Map // serial → "host:port"
 	devices      sync.Map // serial → adb.Device: currently ready devices
 	batteryInfo  sync.Map // serial → [2]float64{pct, temp}: battery at last INFO event
+	lowBattery   sync.Map // serial → struct{}: pod creation deferred due to low battery
 }
 
 // NewManager creates a new K8s Manager.
@@ -244,6 +245,7 @@ func (m *Manager) OnDeviceOffline(serial, platform string) {
 	log.Printf("[k8s] device offline: %s (platform=%s)", serial, platform)
 	m.adbEndpoints.Delete(serial)
 	m.devices.Delete(serial)
+	m.lowBattery.Delete(serial)
 }
 
 // OnDeviceDeleted removes the test pod when a device is fully removed from hub-server.
@@ -338,7 +340,64 @@ func (m *Manager) OnDeviceReady(hub *hubws.HubDevice) {
 		m.rebooting.Delete(dev.Serial)
 	}
 
+	// Defer pod creation if battery is critically low.
+	if bPct := m.batteryPercent(dev.Serial); bPct >= 0 && bPct <= batteryMinPct {
+		log.Printf("[k8s] device %s battery %d%% ≤ %d%% — deferring test pod until charged", dev.Serial, bPct, batteryMinPct)
+		m.lowBattery.Store(dev.Serial, dev)
+		return
+	}
+
 	log.Printf("[k8s] creating test pod for %s (platform=%s)", dev.Serial, dev.Platform)
+	if err := m.createPod(ctx, dev); err != nil {
+		log.Printf("[k8s] create pod for %s: %v", dev.Serial, err)
+	}
+}
+
+const (
+	batteryMinPct    = 30 // pause tests at or below this level
+	batteryResumePct = 35 // resume once battery reaches this level (hysteresis)
+)
+
+// batteryPercent returns the last known battery percentage for the device, or -1 if unknown.
+func (m *Manager) batteryPercent(serial string) int {
+	if v, ok := m.batteryInfo.Load(serial); ok {
+		return int(v.([2]float64)[0])
+	}
+	return -1
+}
+
+// OnBatteryUpdated is called by the hub-ws client when a BATTERY UPDATE arrives.
+// If the device was deferred due to low battery and level is now sufficient, create the test pod.
+func (m *Manager) OnBatteryUpdated(serial, platform string, level, temp int) {
+	m.batteryInfo.Store(serial, [2]float64{float64(level), float64(temp)})
+
+	devVal, isDeferred := m.lowBattery.Load(serial)
+	if !isDeferred {
+		return
+	}
+
+	if level < batteryResumePct {
+		log.Printf("[k8s] battery update: %s %d%% — still below resume threshold (%d%%)", serial, level, batteryResumePct)
+		return
+	}
+
+	dev := devVal.(adb.Device)
+	m.lowBattery.Delete(serial)
+	log.Printf("[k8s] battery update: %s %d%% ≥ %d%% — creating deferred test pod", serial, level, batteryResumePct)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	existing, err := m.client.ListPods(ctx, fmt.Sprintf("%s=true,%s=%s", labelManaged, labelDevice, dev.Serial))
+	if err != nil {
+		log.Printf("[k8s] list pods for %s: %v", dev.Serial, err)
+		return
+	}
+	if len(existing) > 0 {
+		log.Printf("[k8s] pod already exists for device %s — skipping", dev.Serial)
+		return
+	}
+
 	if err := m.createPod(ctx, dev); err != nil {
 		log.Printf("[k8s] create pod for %s: %v", dev.Serial, err)
 	}
