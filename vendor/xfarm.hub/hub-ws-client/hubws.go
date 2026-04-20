@@ -300,8 +300,8 @@ func (c *Client) runOnce(ctx context.Context, wsURL string, handler DeviceEventH
 			case "BATTERY":
 				if len(msg.Data) > 2 {
 					var bat struct {
-						BatteryLevel       int `json:"batteryLevel"`
-						BatteryTemperature int `json:"batteryTemperature"`
+						Level       int `json:"level"`
+						Temperature int `json:"temperature"`
 					}
 					if err := json.Unmarshal(msg.Data, &bat); err == nil {
 						mu.Lock()
@@ -310,8 +310,8 @@ func (c *Client) runOnce(ctx context.Context, wsURL string, handler DeviceEventH
 							platform = d.Platform()
 						}
 						mu.Unlock()
-						log.Printf("[hub-ws] BATTERY UPDATE: %s level=%d%%", msg.Device, bat.BatteryLevel)
-						handler.OnBatteryUpdated(msg.Device, platform, bat.BatteryLevel, bat.BatteryTemperature)
+						log.Printf("[hub-ws] BATTERY UPDATE: %s level=%d%%", msg.Device, bat.Level)
+						handler.OnBatteryUpdated(msg.Device, platform, bat.Level, bat.Temperature)
 					}
 				}
 			}

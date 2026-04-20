@@ -289,14 +289,19 @@ func (m *Manager) OnDeviceReady(hub *hubws.HubDevice) {
 	if hub.Info != nil {
 		bPct := -1
 		var bTemp float64
-		if v, ok := hub.Info["batteryLevel"]; ok {
-			if n, ok := v.(float64); ok {
-				bPct = int(n)
-			}
-		}
-		if v, ok := hub.Info["batteryTemperature"]; ok {
-			if n, ok := v.(float64); ok {
-				bTemp = n
+		// Hub-server embeds battery as nested object: {"battery": {"level": N, "temperature": N}}
+		if bat, ok := hub.Info["battery"]; ok {
+			if batMap, ok := bat.(map[string]interface{}); ok {
+				if v, ok := batMap["level"]; ok {
+					if n, ok := v.(float64); ok {
+						bPct = int(n)
+					}
+				}
+				if v, ok := batMap["temperature"]; ok {
+					if n, ok := v.(float64); ok {
+						bTemp = n
+					}
+				}
 			}
 		}
 		if bPct >= 0 {
