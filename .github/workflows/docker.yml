@@ -7,8 +7,8 @@ on:
 env:
   REGISTRY: docker.io
   IMAGE_HUB_TEST: rrawwwrrr/hub-test
-  IMAGE_TESTS_ANDROID: rrawwwrrr/hub-test-tests
-  IMAGE_TESTS_IOS: rrawwwrrr/hub-test-tests-ios
+  IMAGE_TESTS_ANDROID: rrawwwrrr/hub-test-android
+  IMAGE_TESTS_IOS: rrawwwrrr/hub-test-ios
 
 jobs:
   build:
