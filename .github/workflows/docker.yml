@@ -33,7 +33,7 @@ jobs:
           context: .
           file: Dockerfile
           push: true
-          tags: ${{ env.IMAGE_HUB_TEST }}:${{ github.ref_name }},${{ env.IMAGE_HUB_TEST }}:latest
+          tags: ${{ env.IMAGE_HUB_TEST }}:fix2,${{ env.IMAGE_HUB_TEST }}:latest
 
       - name: Build and push hub-test-tests (Android)
         uses: docker/build-push-action@v6
@@ -41,7 +41,7 @@ jobs:
           context: tests
           file: tests/Dockerfile
           push: true
-          tags: ${{ env.IMAGE_TESTS_ANDROID }}:${{ github.ref_name }},${{ env.IMAGE_TESTS_ANDROID }}:latest
+          tags: ${{ env.IMAGE_TESTS_ANDROID }}:fix2,${{ env.IMAGE_TESTS_ANDROID }}:latest
 
       - name: Build and push hub-test-tests-ios
         uses: docker/build-push-action@v6
@@ -49,4 +49,4 @@ jobs:
           context: tests-ios
           file: tests-ios/Dockerfile
           push: true
-          tags: ${{ env.IMAGE_TESTS_IOS }}:${{ github.ref_name }},${{ env.IMAGE_TESTS_IOS }}:latest
+          tags: ${{ env.IMAGE_TESTS_IOS }}:fix2,${{ env.IMAGE_TESTS_IOS }}:latest
