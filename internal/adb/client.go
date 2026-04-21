@@ -15,12 +15,13 @@ import (
 
 // Device represents a connected Android or iOS device.
 type Device struct {
-	Serial   string
-	State    string
-	Model    string  // ro.product.model (Android) or product name (iOS), populated for ready devices
-	ADBHost  string  // per-device ADB host override (hub mode); empty = use global config
-	ADBPort  int     // per-device ADB port override (hub mode); 0 = use global config
-	Platform string  // "android" or "ios"; empty is treated as "android"
+	Serial    string
+	ADBSerial string // serial as reported by ADB/peer (original case, e.g. "114582552J101167"); may differ from Serial (normalized lowercase)
+	State     string
+	Model     string  // ro.product.model (Android) or product name (iOS), populated for ready devices
+	ADBHost   string  // per-device ADB host override (hub mode); empty = use global config
+	ADBPort   int     // per-device ADB port override (hub mode); 0 = use global config
+	Platform  string  // "android" or "ios"; empty is treated as "android"
 }
 
 // IsReady returns true if the device is online and ready.

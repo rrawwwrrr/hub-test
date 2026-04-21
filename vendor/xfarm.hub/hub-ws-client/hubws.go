@@ -20,7 +20,8 @@ import (
 
 // HubDevice represents a device tracked by hub-server.
 type HubDevice struct {
-	Serial          string                 `json:"serial"`
+	Serial         string                 `json:"serial"`
+	OriginalSerial string                 `json:"originalSerial,omitempty"` // original case serial from USB
 	Type            string                 `json:"type"`   // "android" | "ios"
 	Status          string                 `json:"Status"` // "starting" | "running" | "error" | "stopped"
 	StatusMsg       string                 `json:"StatusMsg"`

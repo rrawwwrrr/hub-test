@@ -273,13 +273,26 @@ func (m *Manager) OnDeviceReady(hub *hubws.HubDevice) {
 
 	// Build adb.Device from hub info.
 	peerHost := fmt.Sprintf("peer-%s.%s.svc.cluster.local", hub.Serial, m.config.Namespace)
+
+	// Use the serial as reported by ADB/peer (original case) for ANDROID_SERIAL so
+	// Appium's case-sensitive comparison against `adb devices` output succeeds.
+	// Peer sends it in Info["serial"] (e.g. "114582552J101167"), while hub.Serial is
+	// normalized lowercase ("114582552j101167").
+	adbSerial := hub.Serial
+	if hub.Info != nil {
+		if s, ok := hub.Info["serial"].(string); ok && s != "" {
+			adbSerial = s
+		}
+	}
+
 	dev := adb.Device{
-		Serial:   hub.Serial,
-		State:    "device",
-		Model:    hub.Model(),
-		ADBHost:  peerHost,
-		ADBPort:  5037,
-		Platform: hub.Platform(),
+		Serial:    hub.Serial,
+		ADBSerial: adbSerial,
+		State:     "device",
+		Model:     hub.Model(),
+		ADBHost:   peerHost,
+		ADBPort:   5037,
+		Platform:  hub.Platform(),
 	}
 
 	// Store battery info from device Info payload.
@@ -596,7 +609,7 @@ kill $APID
 wait $APID 2>/dev/null
 exit 0`
 	appiumEnv := []EnvVar{
-		{Name: "ANDROID_SERIAL", Value: dev.Serial},
+		{Name: "ANDROID_SERIAL", Value: dev.ADBSerial},
 		{Name: "TZ", Value: "Europe/Moscow"},
 	}
 	// Without hub-client, point Appium directly at the remote peer ADB server.
@@ -621,7 +634,7 @@ STATUS=$?
 touch /shared/done
 exit $STATUS`
 	testsEnv := []EnvVar{
-		{Name: "ANDROID_SERIAL", Value: dev.Serial},
+		{Name: "ANDROID_SERIAL", Value: dev.ADBSerial},
 		{Name: "APPIUM_HOST", Value: "localhost"},
 		{Name: "APPIUM_PORT", Value: "4723"},
 		{Name: "TZ", Value: "Europe/Moscow"},
