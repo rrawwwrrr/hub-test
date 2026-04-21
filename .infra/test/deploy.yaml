@@ -9,6 +9,8 @@ kind: ServiceAccount
 metadata:
   name: hub-test
   namespace: peer
+imagePullSecrets:
+  - name: regcred
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -113,8 +115,6 @@ spec:
         app: hub-test
     spec:
       serviceAccountName: hub-test
-      imagePullSecrets:
-        - name: regcred
       containers:
         - name: hub-test
           image: docker-registry.x5.ru/rrawwwrrr/hub-test:fix
