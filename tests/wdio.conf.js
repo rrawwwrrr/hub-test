@@ -80,37 +80,25 @@ exports.config = {
       console.warn(`[setup] apk install failed: ${e.message}`);
     }
 
-    // Grant SYSTEM_ALERT_WINDOW to Appium packages from within the session.
+    // Grant SYSTEM_ALERT_WINDOW to the app under test from within the session.
     // This runs AFTER Appium has installed/verified its helper apps, so the
     // permission is not lost due to package reinstallation.
     // Requires --allow-insecure=adb_shell on the Appium server.
-    const appiumPkgs = [
-      'io.appium.settings',
-      'io.appium.uiautomator2.server',
-      'io.appium.uiautomator2.server.test',
-      'io.appium.android.apis',
-    ];
-    for (const pkg of appiumPkgs) {
-      try {
-        await driver.execute('mobile: shell', {
-          command: 'appops',
-          args: ['set', pkg, 'SYSTEM_ALERT_WINDOW', 'allow'],
-        });
-        console.log(`[before] granted SYSTEM_ALERT_WINDOW to ${pkg}`);
-      } catch (e) {
-        console.warn(`[before] appops set ${pkg}: ${e.message}`);
-      }
-    }
-    // POST_NOTIFICATIONS (Android 13+): only for packages that declare it
-    // in their manifest. Appium internal packages do not declare it, so
-    // pm grant throws SecurityException for them — skip them here.
-    for (const pkg of ['io.appium.android.apis']) {
-      try {
-        await driver.execute('mobile: shell', {
-          command: 'pm',
-          args: ['grant', pkg, 'android.permission.POST_NOTIFICATIONS'],
-        });
-      } catch (e) { /* pre-Android 13 or permission not declared */ }
+    //
+    // NOTE: do NOT do this for Appium's own packages (io.appium.settings,
+    // io.appium.uiautomator2.server[.test]) or grant POST_NOTIFICATIONS here —
+    // on this device/ROM (Realme/Oppo, OppoPackageManagerService) both calls
+    // intermittently crash the running UiAutomator2 instrumentation process
+    // outright (not just throw a catchable JS exception), failing the whole
+    // run. Neither grant is actually needed for this test.
+    try {
+      await driver.execute('mobile: shell', {
+        command: 'appops',
+        args: ['set', 'io.appium.android.apis', 'SYSTEM_ALERT_WINDOW', 'allow'],
+      });
+      console.log('[before] granted SYSTEM_ALERT_WINDOW to io.appium.android.apis');
+    } catch (e) {
+      console.warn(`[before] appops set io.appium.android.apis: ${e.message}`);
     }
 
     // Wake screen and dismiss keyguard (works only on devices without PIN/password).
