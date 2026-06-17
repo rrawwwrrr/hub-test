@@ -90,9 +90,9 @@ func NewServer(s *store.Store, hub *Hub) *Server {
 			}
 			return strconv.Itoa(secs/60) + "м " + strconv.Itoa(secs%60) + "с"
 		},
-		"sub":          func(a, b float64) float64 { return a - b },
-		"divF":         func(a int, b int) float64 { return float64(a) / float64(b) },
-		"fmtMs":        func(ms float64) string {
+		"sub":  func(a, b float64) float64 { return a - b },
+		"divF": func(a int, b int) float64 { return float64(a) / float64(b) },
+		"fmtMs": func(ms float64) string {
 			if ms <= 0 {
 				return "—"
 			}
@@ -161,11 +161,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAPILog serves a single log file as plain text.
-// Query params: id (run ID), type ("test" or "appium").
+// Query params: id (run ID), type ("test", "appium" or "hub-client").
 func (s *Server) handleAPILog(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	typ := r.URL.Query().Get("type")
-	if id == "" || (typ != "test" && typ != "appium") {
+	if id == "" || (typ != "test" && typ != "appium" && typ != "hub-client") {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -500,6 +500,7 @@ tr:hover td{background:#1a1d27}
     <div class="mtabs">
       <button id="btn-t" class="mtab on" onclick="switchLog('test')">тест</button>
       <button id="btn-a" class="mtab"    onclick="switchLog('appium')">appium</button>
+      <button id="btn-h" class="mtab"    onclick="switchLog('hub-client')">hub-client</button>
       <button id="btn-s" class="mtab"    onclick="switchLog('screenshot')" style="display:none">📷 скрин</button>
       <button class="mclose" onclick="closeModal()">✕ закрыть</button>
     </div>
@@ -667,6 +668,7 @@ tr:hover td{background:#1a1d27}
     {{if .HasLogs}}
     <button class="log-btn"    onclick="openLog({{.ID}},'test')">тест</button>
     <button class="log-btn ab" onclick="openLog({{.ID}},'appium')">appium</button>
+    <button class="log-btn ab" onclick="openLog({{.ID}},'hub-client')">hub-client</button>
     {{end}}{{if .HasScreenshot}}<button class="log-btn sc" onclick="openScr({{.ID}})">📷 скрин</button>{{end}}
     {{if not .HasLogs}}{{if not .HasScreenshot}}—{{end}}{{end}}
   </td>
@@ -975,12 +977,13 @@ async function openHistory(serial, model){
       title=document.getElementById('mtitle'),
       btnT=document.getElementById('btn-t'),
       btnA=document.getElementById('btn-a'),
+      btnH=document.getElementById('btn-h'),
       btnS=document.getElementById('btn-s'),
       pre=document.getElementById('mpre'),
       scr=document.getElementById('mscr'),
       hist=document.getElementById('mhist');
   title.textContent='История: '+serial+(model?' ('+model+')':'');
-  btnT.style.display='none';btnA.style.display='none';btnS.style.display='none';
+  btnT.style.display='none';btnA.style.display='none';btnH.style.display='none';btnS.style.display='none';
   pre.style.display='none';pre.textContent='';
   scr.style.display='none';scr.src='';
   hist.style.display='';
@@ -1055,9 +1058,10 @@ async function openHistory(serial, model){
 // Modal
 async function openLog(id,type){
   _mid=id;_mtype=type;
-  document.getElementById('mtitle').textContent=(type==='test'?'Лог теста':'Лог Appium')+' #'+id;
+  document.getElementById('mtitle').textContent=(type==='test'?'Лог теста':type==='appium'?'Лог Appium':'Лог hub-client')+' #'+id;
   document.getElementById('btn-t').className='mtab'+(type==='test'?' on':'');document.getElementById('btn-t').style.display='';
   document.getElementById('btn-a').className='mtab'+(type==='appium'?' on':'');document.getElementById('btn-a').style.display='';
+  document.getElementById('btn-h').className='mtab'+(type==='hub-client'?' on':'');document.getElementById('btn-h').style.display='';
   document.getElementById('btn-s').style.display='none';
   var hist=document.getElementById('mhist');hist.style.display='none';hist.innerHTML='';
   var pre=document.getElementById('mpre'),scr=document.getElementById('mscr');
@@ -1079,6 +1083,7 @@ function openScr(id){
   document.getElementById('mtitle').textContent='Скриншот #'+id;
   document.getElementById('btn-t').className='mtab';document.getElementById('btn-t').style.display='';
   document.getElementById('btn-a').className='mtab';document.getElementById('btn-a').style.display='';
+  document.getElementById('btn-h').className='mtab';document.getElementById('btn-h').style.display='';
   document.getElementById('btn-s').className='mtab on';
   document.getElementById('btn-s').style.display='';
   var hist=document.getElementById('mhist');hist.style.display='none';hist.innerHTML='';
@@ -1095,7 +1100,7 @@ function switchLog(t){
   if(t==='screenshot')openScr(_mid);
   else openLog(_mid,t);
 }
-function closeModal(){var h=document.getElementById('mhist');document.getElementById('modal').style.display='none';document.getElementById('mscr').src='';h.style.display='none';h.innerHTML='';document.getElementById('btn-t').style.display='';document.getElementById('btn-a').style.display=''}
+function closeModal(){var h=document.getElementById('mhist');document.getElementById('modal').style.display='none';document.getElementById('mscr').src='';h.style.display='none';h.innerHTML='';document.getElementById('btn-t').style.display='';document.getElementById('btn-a').style.display='';document.getElementById('btn-h').style.display=''}
 document.addEventListener('keydown',function(e){if(e.key==='Escape')closeModal()});
 </script>
 </body>

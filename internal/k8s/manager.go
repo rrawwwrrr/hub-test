@@ -26,30 +26,31 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // Config holds configuration for the K8s manager.
 type Config struct {
-	AppiumImage          string
-	TestImage            string // Android test image; "" = no test containers
-	IOSTestImage         string // iOS test image; "" = skip iOS devices
-	IOSAppiumImage       string // Appium image for iOS; falls back to AppiumImage
-	IPAServeURL          string // IPA URL passed to iOS test container as IOS_IPA_URL
-	IOSBundleID          string // bundle ID passed to iOS test container as IOS_BUNDLE_ID
-	HubClientImage       string // "" = no hub-client container
-	HubUsbmuxdHost       string // USBMUXD_HOST for hub-client (hub-server TCP proxy host)
-	HubUsbmuxdPort       string // USBMUXD_PORT for hub-client (default "27015")
-	HubHandshakeSecret   string // HANDSHAKE_SECRET for hub-client AES-GCM encryption
-	AdbTunnelMode        string // ADB_TUNNEL_MODE for hub-client: "persistent" or "transient" (default)
-	APKServeURL          string // e.g. http://hub-test.peer.svc.cluster.local:8080/apk/ApiDemos-debug.apk
-	HubURL               string // hub-server base URL e.g. http://hub-server.peer.svc.cluster.local:8080
-	Namespace            string
+	AppiumImage        string
+	TestImage          string // Android test image; "" = no test containers
+	IOSTestImage       string // iOS test image; "" = skip iOS devices
+	IOSAppiumImage     string // Appium image for iOS; falls back to AppiumImage
+	IPAServeURL        string // IPA URL passed to iOS test container as IOS_IPA_URL
+	IOSBundleID        string // bundle ID passed to iOS test container as IOS_BUNDLE_ID
+	HubClientImage     string // "" = no hub-client container
+	HubUsbmuxdHost     string // USBMUXD_HOST for hub-client (hub-server TCP proxy host)
+	HubUsbmuxdPort     string // USBMUXD_PORT for hub-client (default "27015")
+	HubHandshakeSecret string // HANDSHAKE_SECRET for hub-client AES-GCM encryption
+	AdbTunnelMode      string // ADB_TUNNEL_MODE for hub-client: "persistent" or "transient" (default)
+	APKServeURL        string // e.g. http://hub-test.peer.svc.cluster.local:8080/apk/ApiDemos-debug.apk
+	HubURL             string // hub-server base URL e.g. http://hub-server.peer.svc.cluster.local:8080
+	Namespace          string
 }
 
 // Manager orchestrates K8s Pods for Appium + test execution.
 type Manager struct {
-	client      *Client
-	config      Config
-	store       *store.Store
-	NotifyFn    func() // called after each run is saved
-	ReconcileFn func() // called when a pod finishes to trigger next cycle
+	client       *Client
+	config       Config
+	store        *store.Store
+	NotifyFn     func()   // called after each run is saved
+	ReconcileFn  func()   // called when a pod finishes to trigger next cycle
 	rebooting    sync.Map // serial → struct{}: device is mid-reboot
+	stabilizing  sync.Map // serial → struct{}: device back online, waiting out post-boot settle delay
 	reported     sync.Map // podName → struct{}: already processed
 	reportMu     sync.Mutex
 	adbEndpoints sync.Map // serial → "host:port"
@@ -160,10 +161,9 @@ func (m *Manager) Reconcile(ctx context.Context, devices []adb.Device) error {
 		if pod == nil {
 			// No pod yet — create one.
 			// If we're waiting for a reboot, the device being back in readyDevices
-			// means it has come back online — clear the flag and proceed.
-			if _, isRebooting := m.rebooting.Load(serial); isRebooting {
-				log.Printf("[k8s] device %s back online after reboot", serial)
-				m.rebooting.Delete(serial)
+			// means it has come back online — let it settle before starting tests.
+			if m.scheduleStabilization(serial, dev) {
+				continue
 			}
 			log.Printf("[k8s] creating test pod for %s (platform=%s)", serial, dev.Platform)
 			if err := m.createPod(ctx, dev); err != nil {
@@ -352,13 +352,18 @@ func (m *Manager) OnDeviceReady(hub *hubws.HubDevice) {
 		return
 	}
 
-	// Clear rebooting flag if set (device came back after reboot).
-	if _, isRebooting := m.rebooting.Load(dev.Serial); isRebooting {
-		log.Printf("[k8s] device %s back online after reboot", dev.Serial)
-		m.rebooting.Delete(dev.Serial)
+	// If we're waiting for a reboot, let the device settle before starting tests.
+	// scheduleStabilization itself retries pod creation once the delay elapses —
+	// it does not depend on ReconcileFn, which is unset in hub/k8s mode.
+	if m.scheduleStabilization(dev.Serial, dev) {
+		return
 	}
 
-	// Defer pod creation if battery is critically low.
+	m.maybeCreatePod(context.Background(), dev)
+}
+
+// maybeCreatePod creates a test pod for dev unless deferred for low battery.
+func (m *Manager) maybeCreatePod(ctx context.Context, dev adb.Device) {
 	if bPct := m.batteryPercent(dev.Serial); bPct >= 0 && bPct <= batteryMinPct {
 		log.Printf("[k8s] device %s battery %d%% ≤ %d%% — deferring test pod until charged", dev.Serial, bPct, batteryMinPct)
 		m.lowBattery.Store(dev.Serial, dev)
@@ -374,7 +379,49 @@ func (m *Manager) OnDeviceReady(hub *hubws.HubDevice) {
 const (
 	batteryMinPct    = 30 // pause tests at or below this level
 	batteryResumePct = 35 // resume once battery reaches this level (hysteresis)
+
+	// postRebootStabilizeDelay is how long to wait after ADB reports a device
+	// ready before starting the next test pod. Some devices (e.g. Realme)
+	// switch USB VID:PID shortly after the initial ADB-ready signal, briefly
+	// dropping off ADB; without this pause Appium sessions started too early
+	// can crash mid-boot while background apps are still settling.
+	postRebootStabilizeDelay = 15 * time.Second
 )
+
+// scheduleStabilization, if the device is mid-reboot, defers pod creation for
+// postRebootStabilizeDelay and then creates the test pod itself once the device
+// has settled. It does not rely on ReconcileFn, which is left unset in hub/k8s
+// mode (only the docker-mode watch loop wires it up) — relying on it here would
+// silently strand the device with rebooting/stabilizing flags set forever and
+// no pod ever created. Returns true if the device was rebooting (caller should
+// skip its own pod-creation logic for now).
+func (m *Manager) scheduleStabilization(serial string, dev adb.Device) bool {
+	if _, isRebooting := m.rebooting.Load(serial); !isRebooting {
+		return false
+	}
+	if _, already := m.stabilizing.LoadOrStore(serial, struct{}{}); already {
+		return true
+	}
+	log.Printf("[k8s] device %s back online after reboot, stabilising (%s)...", serial, postRebootStabilizeDelay)
+	go func() {
+		time.Sleep(postRebootStabilizeDelay)
+		m.stabilizing.Delete(serial)
+		m.rebooting.Delete(serial)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		existing, err := m.client.ListPods(ctx, fmt.Sprintf("%s=true,%s=%s", labelManaged, labelDevice, serial))
+		if err != nil {
+			log.Printf("[k8s] list pods for %s: %v", serial, err)
+			return
+		}
+		if len(existing) > 0 {
+			return
+		}
+		m.maybeCreatePod(ctx, dev)
+	}()
+	return true
+}
 
 // batteryPercent returns the last known battery percentage for the device, or -1 if unknown.
 func (m *Manager) batteryPercent(serial string) int {
@@ -591,12 +638,13 @@ kill $HID 2>/dev/null
 wait $HID 2>/dev/null
 exit 0`
 		containers = append(containers, Container{
-			Name:         "hub-client",
-			Image:        m.config.HubClientImage,
-			Command:      []string{"sh", "-c"},
-			Args:         []string{hubClientScript},
-			Env:          hubClientEnv,
-			VolumeMounts: []VolumeMount{{Name: "shared", MountPath: "/shared"}},
+			Name:            "hub-client",
+			Image:           m.config.HubClientImage,
+			ImagePullPolicy: "Always",
+			Command:         []string{"sh", "-c"},
+			Args:            []string{hubClientScript},
+			Env:             hubClientEnv,
+			VolumeMounts:    []VolumeMount{{Name: "shared", MountPath: "/shared"}},
 		})
 	}
 
@@ -620,12 +668,13 @@ exit 0`
 		)
 	}
 	containers = append(containers, Container{
-		Name:         "appium",
-		Image:        m.config.AppiumImage,
-		Command:      []string{"sh", "-c"},
-		Args:         []string{appiumScript},
-		Env:          appiumEnv,
-		VolumeMounts: []VolumeMount{{Name: "shared", MountPath: "/shared"}},
+		Name:            "appium",
+		Image:           m.config.AppiumImage,
+		ImagePullPolicy: "Always",
+		Command:         []string{"sh", "-c"},
+		Args:            []string{appiumScript},
+		Env:             appiumEnv,
+		VolumeMounts:    []VolumeMount{{Name: "shared", MountPath: "/shared"}},
 	})
 
 	// tests container — wraps the image entrypoint, signals done on exit.
@@ -643,12 +692,13 @@ exit $STATUS`
 		testsEnv = append(testsEnv, EnvVar{Name: "APIDEMOS_APK_URL", Value: m.config.APKServeURL})
 	}
 	containers = append(containers, Container{
-		Name:         "tests",
-		Image:        m.config.TestImage,
-		Command:      []string{"sh", "-c"},
-		Args:         []string{testsScript},
-		Env:          testsEnv,
-		VolumeMounts: []VolumeMount{{Name: "shared", MountPath: "/shared"}},
+		Name:            "tests",
+		Image:           m.config.TestImage,
+		ImagePullPolicy: "Always",
+		Command:         []string{"sh", "-c"},
+		Args:            []string{testsScript},
+		Env:             testsEnv,
+		VolumeMounts:    []VolumeMount{{Name: "shared", MountPath: "/shared"}},
 	})
 
 	pod := &Pod{
@@ -706,10 +756,11 @@ func (m *Manager) createIOSPod(ctx context.Context, dev adb.Device) error {
 			hubEnv = append(hubEnv, EnvVar{Name: "TUNNEL_MODE", Value: m.config.AdbTunnelMode})
 		}
 		containers = append(containers, Container{
-			Name:         "hub-client",
-			Image:        m.config.HubClientImage,
-			Env:          hubEnv,
-			VolumeMounts: []VolumeMount{{Name: "usbmuxd-run", MountPath: "/var/run"}},
+			Name:            "hub-client",
+			Image:           m.config.HubClientImage,
+			ImagePullPolicy: "Always",
+			Env:             hubEnv,
+			VolumeMounts:    []VolumeMount{{Name: "usbmuxd-run", MountPath: "/var/run"}},
 		})
 	}
 
@@ -729,11 +780,12 @@ exit 0`
 		{Name: "TZ", Value: "Europe/Moscow"},
 	}
 	containers = append(containers, Container{
-		Name:    "appium",
-		Image:   iosAppiumImage,
-		Command: []string{"sh", "-c"},
-		Args:    []string{appiumScript},
-		Env:     appiumEnv,
+		Name:            "appium",
+		Image:           iosAppiumImage,
+		ImagePullPolicy: "Always",
+		Command:         []string{"sh", "-c"},
+		Args:            []string{appiumScript},
+		Env:             appiumEnv,
 		VolumeMounts: []VolumeMount{
 			{Name: "shared", MountPath: "/shared"},
 			{Name: "usbmuxd-run", MountPath: "/var/run"},
@@ -761,12 +813,13 @@ exit $STATUS`
 		testsEnv = append(testsEnv, EnvVar{Name: "IOS_BUNDLE_ID", Value: m.config.IOSBundleID})
 	}
 	containers = append(containers, Container{
-		Name:         "tests",
-		Image:        m.config.IOSTestImage,
-		Command:      []string{"sh", "-c"},
-		Args:         []string{testsScript},
-		Env:          testsEnv,
-		VolumeMounts: []VolumeMount{{Name: "shared", MountPath: "/shared"}},
+		Name:            "tests",
+		Image:           m.config.IOSTestImage,
+		ImagePullPolicy: "Always",
+		Command:         []string{"sh", "-c"},
+		Args:            []string{testsScript},
+		Env:             testsEnv,
+		VolumeMounts:    []VolumeMount{{Name: "shared", MountPath: "/shared"}},
 	})
 
 	gracePeriod := int64(5) // Kill sidecar containers (hub-client) quickly after tests finish.
@@ -809,24 +862,25 @@ var (
 )
 
 type testRunSummary struct {
-	Serial     string
-	Model      string
-	Platform   string // "android" or "ios"
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Passing    int
-	Failing    int
-	Pending    int
-	Found      bool
-	TestSecs   float64
-	TestLog    []byte
-	AppiumLog  []byte
-	Screenshot []byte
-	BatteryPct  int
-	BatteryTemp float64
-	RunID       int64
-	SessionMs  int
-	ApkMs      int
+	Serial       string
+	Model        string
+	Platform     string // "android" or "ios"
+	StartedAt    time.Time
+	FinishedAt   time.Time
+	Passing      int
+	Failing      int
+	Pending      int
+	Found        bool
+	TestSecs     float64
+	TestLog      []byte
+	AppiumLog    []byte
+	HubClientLog []byte
+	Screenshot   []byte
+	BatteryPct   int
+	BatteryTemp  float64
+	RunID        int64
+	SessionMs    int
+	ApkMs        int
 }
 
 func (s testRunSummary) deviceLabel() string {
@@ -882,6 +936,15 @@ func (m *Manager) processPodResult(ctx context.Context, serial, model, platform 
 	appiumLog, err := m.client.PodLogs(ctx, pod.Metadata.Name, "appium", 2000)
 	if err == nil {
 		summary.AppiumLog = appiumLog
+	}
+
+	// Read hub-client container logs (last 2000 lines) — the sidecar that
+	// tunnels ADB/Appium through hub-server. Captured here because the pod
+	// is deleted right after this function returns, so this is the only
+	// chance to keep these logs for diagnosing tunnel issues.
+	hubClientLog, err := m.client.PodLogs(ctx, pod.Metadata.Name, "hub-client", 2000)
+	if err == nil {
+		summary.HubClientLog = hubClientLog
 	}
 
 	// Parse wdio output.
@@ -964,8 +1027,8 @@ func (m *Manager) saveTestResult(summary testRunSummary) testRunSummary {
 			Found:        summary.Found,
 			TotalSeconds: summary.totalDuration().Seconds(),
 			TestSeconds:  summary.TestSecs,
-			BatteryPct:  summary.BatteryPct,
-			BatteryTemp: summary.BatteryTemp,
+			BatteryPct:   summary.BatteryPct,
+			BatteryTemp:  summary.BatteryTemp,
 			SessionMs:    summary.SessionMs,
 			ApkMs:        summary.ApkMs,
 		}
@@ -1033,6 +1096,26 @@ func (m *Manager) rebootAndReport(summary testRunSummary) {
 		log.Printf("[k8s/reboot] %s: %v", summary.Serial, err)
 		m.rebooting.Delete(summary.Serial)
 		m.updateBootResult(summary.RunID, 0, false)
+		// Reboot failed — device is still online. Schedule the next test run after a short delay
+		// so the cycle continues even without a device power cycle.
+		go func() {
+			time.Sleep(10 * time.Second)
+			devVal, ok := m.devices.Load(summary.Serial)
+			if !ok {
+				return
+			}
+			dev := devVal.(adb.Device)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			existing, err := m.client.ListPods(ctx, fmt.Sprintf("%s=true,%s=%s", labelManaged, labelDevice, dev.Serial))
+			if err != nil || len(existing) > 0 {
+				return
+			}
+			log.Printf("[k8s] reboot failed, scheduling next test pod for %s", dev.Serial)
+			if err := m.createPod(ctx, dev); err != nil {
+				log.Printf("[k8s] create pod for %s: %v", dev.Serial, err)
+			}
+		}()
 		return
 	}
 	// rebooting flag stays set; Reconcile clears it when device comes back online.
@@ -1099,6 +1182,10 @@ func (m *Manager) saveLogs(runID int64, summary testRunSummary) {
 	}
 	if len(summary.AppiumLog) > 0 {
 		_ = os.WriteFile(dir+"/appium.log", summary.AppiumLog, 0o644)
+		hasLogs = true
+	}
+	if len(summary.HubClientLog) > 0 {
+		_ = os.WriteFile(dir+"/hub-client.log", summary.HubClientLog, 0o644)
 		hasLogs = true
 	}
 	if hasLogs && m.store != nil {

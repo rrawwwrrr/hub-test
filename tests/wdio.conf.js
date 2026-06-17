@@ -185,4 +185,20 @@ exports.config = {
       throw new Error(`ApiDemos is not in foreground after 3 attempts (got: ${activity})`);
     }
   },
+
+  async after() {
+    // Appium captures logcat in-memory for the session; dump it into the
+    // tests container's stdout (already saved as test.log) so it's not lost
+    // once the pod is deleted.
+    try {
+      const logcat = await driver.getLogs('logcat');
+      console.log('===LOGCAT_START===');
+      for (const entry of logcat) {
+        console.log(entry.message);
+      }
+      console.log('===LOGCAT_END===');
+    } catch (e) {
+      console.warn(`[after] could not fetch logcat: ${e.message}`);
+    }
+  },
 };
